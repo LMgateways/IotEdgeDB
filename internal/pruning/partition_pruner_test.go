@@ -1292,7 +1292,7 @@ func TestExtractStoragePrefix(t *testing.T) {
 
 // TestStartCleanup_RemovesExpiredEntries verifies the janitor goroutine
 // sweeps expired entries from both caches at the configured interval.
-// Pre-PR the public Cleanup{Glob,Partition}Cache methods existed but
+// Previously the public Cleanup{Glob,Partition}Cache methods existed but
 // had no production caller; entries that expired by TTL stayed in the
 // map until invalidate() ran (post-compaction). This test pins that
 // the janitor actually evicts past-TTL entries on its own.
@@ -1392,7 +1392,6 @@ func TestStartCleanup_DefaultInterval(t *testing.T) {
 
 // TestStartCleanup_ClampsTinyInterval verifies that intervals below
 // minCleanupInterval are clamped up to prevent a tight-loop sweep.
-// Gemini round 3 finding (PR #450).
 func TestStartCleanup_ClampsTinyInterval(t *testing.T) {
 	if minCleanupInterval <= 0 {
 		t.Fatalf("minCleanupInterval must be positive, got %v", minCleanupInterval)
@@ -1474,8 +1473,7 @@ func TestStartCleanup_Idempotent(t *testing.T) {
 // TestGeneratePartitionPathsClampsStartToEpoch verifies that a start before the
 // epoch floor is clamped UP to 1970-01-01 (not rejected), so a degenerate old
 // start doesn't drive a huge pre-data range but a two-sided query with an old
-// start still prunes to [1970, end) instead of dropping legitimate rows (#536,
-// reviewer finding H1).
+// start still prunes to [1970, end) instead of dropping legitimate rows.
 func TestGeneratePartitionPathsClampsStartToEpoch(t *testing.T) {
 	p := NewPartitionPruner(zerolog.Nop())
 
@@ -1535,7 +1533,7 @@ func TestGeneratePartitionPathsClampIsLossless(t *testing.T) {
 
 // TestGeneratePartitionPathsCap verifies the path-count cap defuses the
 // amplification DoS: an over-wide range returns nil (caller falls back to the
-// unpruned glob) instead of materializing millions of path strings (#536).
+// unpruned glob) instead of materializing millions of path strings.
 func TestGeneratePartitionPathsCap(t *testing.T) {
 	p := NewPartitionPruner(zerolog.Nop())
 
@@ -1572,7 +1570,7 @@ func TestGeneratePartitionPathsCap(t *testing.T) {
 			t.Fatal("expected paths for a range just under the cap, got nil")
 		}
 		// The estimate must be a true upper bound: the materialized count must
-		// never exceed the cap (reviewer finding M1 — estimate must not
+		// never exceed the cap (estimate must not
 		// under-count vs the loop's ceil + daily paths).
 		if len(paths) > maxPartitionPaths {
 			t.Fatalf("materialized %d paths, exceeds cap %d (estimate under-counted)", len(paths), maxPartitionPaths)
@@ -1581,7 +1579,7 @@ func TestGeneratePartitionPathsCap(t *testing.T) {
 }
 
 // TestGeneratePartitionPathsContextCancel verifies a cancelled context aborts
-// path generation so a client disconnect / deadline stops the work (#536).
+// path generation so a client disconnect / deadline stops the work.
 func TestGeneratePartitionPathsContextCancel(t *testing.T) {
 	p := NewPartitionPruner(zerolog.Nop())
 
@@ -1599,7 +1597,7 @@ func TestGeneratePartitionPathsContextCancel(t *testing.T) {
 }
 
 // TestGlobCacheEvictOnRead verifies expired glob entries are removed on read,
-// not merely reported as a miss, so distinct keys can't accumulate (#536).
+// not merely reported as a miss, so distinct keys can't accumulate.
 func TestGlobCacheEvictOnRead(t *testing.T) {
 	c := newGlobCache(10 * time.Millisecond)
 	c.set("pattern-a", []string{"file1"})
@@ -1639,7 +1637,7 @@ func TestPartitionCacheEvictOnRead(t *testing.T) {
 
 // TestGlobCacheMaxEntries verifies the glob cache refuses new keys past its cap
 // (after evicting expired entries) so attacker-varied keys can't grow it
-// unbounded (#536). Uses a long TTL so nothing expires during the test.
+// unbounded. Uses a long TTL so nothing expires during the test.
 func TestGlobCacheMaxEntries(t *testing.T) {
 	c := newGlobCache(1 * time.Hour)
 	c.maxEntries = 3

@@ -102,8 +102,7 @@ func (e *ParallelExecutor) ExecutePartitioned(
 	// up-front — for a 10K-path query that's 10K goroutines parked on
 	// a 4-slot semaphore. The launch loop now blocks on the semaphore
 	// itself, so concurrent in-flight goroutines are bounded by
-	// MaxConcurrentPartitions regardless of paths length. See
-	// review/query-path-criticals C4 (parallel-executor fan-out DoS).
+	// MaxConcurrentPartitions regardless of paths length.
 	results := make([]*PartitionResult, len(paths))
 	var wg sync.WaitGroup
 

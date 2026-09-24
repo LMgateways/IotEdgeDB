@@ -53,7 +53,7 @@ func BenchmarkMinMaxScan_SingleHour(b *testing.B) {
 	}
 }
 
-// BenchmarkMinMaxScan_ElseIf: the else-if + times[1:] variant a reviewer suggested.
+// BenchmarkMinMaxScan_ElseIf: the else-if + times[1:] variant.
 // Kept to document that it is NOT used: on ascending live-ingest input it is ~24%
 // slower (1.55ms vs 1.25ms on 5M rows) because the else-if makes the second comparison
 // data-dependent, defeating the branch predictor on monotonic data. See the production

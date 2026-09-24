@@ -170,7 +170,7 @@ func splitOnDelimiter(data []byte, delim byte) [][]byte {
 	// (same as before, just lazily). Verified: this is a net win on
 	// full-path ParseBatch.
 	//
-	// Note: tried dynamic capacity (cap=8 on comma) per Gemini R1 but
+	// Note: tried dynamic capacity (cap=8 on comma) but
 	// the full-path ParseBatch bench regressed by +9% / +1.9 KB
 	// because most production comma-splits have ≤4 parts. Kept at 4
 	// with bench evidence.

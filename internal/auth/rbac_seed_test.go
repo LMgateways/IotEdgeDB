@@ -10,12 +10,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// TestSeedRBACFromLocalSQLite_CancelledCtxSkipsChildCounts pins
-// Gemini PR #458 round 7 G24: when ctx is already cancelled at the
-// point the per-org propose loop finishes (or breaks via G10),
-// SeedRBACFromLocalSQLite must NOT execute the 4 COUNT(*) queries
-// that detect pre-A.1 child rows — each would fail with
-// `context canceled` and flood the log with four useless Warn lines.
+// TestSeedRBACFromLocalSQLite_CancelledCtxSkipsChildCounts: when ctx
+// is already cancelled at the point the per-org propose loop finishes
+// (or breaks out early), SeedRBACFromLocalSQLite must NOT execute the
+// 4 COUNT(*) queries that detect pre-A.1 child rows — each would fail
+// with `context canceled` and flood the log with four useless Warn
+// lines.
 //
 // We use a pre-cancelled ctx so the loop never starts and the seed
 // returns firstErr=ctx.Err() before reaching the COUNT(*) block.
@@ -59,7 +59,7 @@ func TestSeedRBACFromLocalSQLite_CancelledCtxSkipsChildCounts(t *testing.T) {
 		t.Errorf("expected context.Canceled in error chain, got: %v", err)
 	}
 	// Sanity: should bail well within 200ms. If we forgot to add
-	// the G24 ctx check, the 4 COUNT(*) queries would all run +
+	// the ctx check, the 4 COUNT(*) queries would all run +
 	// each emit a Warn before the function returns — observable
 	// indirectly via elapsed time + log noise (we don't tap logs
 	// here, but timing alone is a tight signal).

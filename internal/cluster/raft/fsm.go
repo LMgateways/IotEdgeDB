@@ -441,8 +441,7 @@ type ClusterFSM struct {
 	//     counters stay in sync.
 	//
 	// Atomic because /metrics scrapes read the (process-wide) sibling
-	// counter concurrently with FSM Apply on the runFSM goroutine. See
-	// GHSA-f85q-mvg8-qf37.
+	// counter concurrently with FSM Apply on the runFSM goroutine.
 	rejectedPaths atomic.Int64
 
 	// rejectedTokens counts token commands refused by applier-side
@@ -562,7 +561,7 @@ func NewClusterFSM(logger zerolog.Logger) *ClusterFSM {
 // f.files, which never contained the malicious entry).
 //
 // op is "register" or "update" for log disambiguation. errors.Is(err,
-// ErrPath*) gives the rejection reason. See GHSA-f85q-mvg8-qf37.
+// ErrPath*) gives the rejection reason.
 func (f *ClusterFSM) rejectManifestPath(op, path string, logIndex uint64, err error) error {
 	f.incRejectedPaths()
 	f.logger.Error().
@@ -580,7 +579,7 @@ func (f *ClusterFSM) rejectManifestPath(op, path string, logIndex uint64, err er
 // /api/v1/metrics as iedb_cluster_manifest_rejected_paths_total).
 // Every site that refuses a manifest entry — runtime apply, batch
 // pre-pass, snapshot Restore — calls through here so the two
-// counters stay in sync. See GHSA-f85q-mvg8-qf37.
+// counters stay in sync.
 func (f *ClusterFSM) incRejectedPaths() {
 	f.rejectedPaths.Add(1)
 	metrics.Get().IncClusterManifestRejectedPaths()
@@ -592,7 +591,6 @@ func (f *ClusterFSM) incRejectedPaths() {
 // non-zero growth rate is the load-bearing operator signal that
 // somebody — a peer, a stored snapshot, or a pre-validation Raft log
 // entry — proposed a path this FSM refused. Scrape and alert on it.
-// See GHSA-f85q-mvg8-qf37.
 func (f *ClusterFSM) RejectedPathsCount() int64 {
 	return f.rejectedPaths.Load()
 }
@@ -1032,12 +1030,12 @@ func (f *ClusterFSM) applyRegisterFile(payload []byte, logIndex uint64) interfac
 // apply loop. Non-batch callers go through applyRegisterFile, which
 // unmarshals + dispatches here.
 func (f *ClusterFSM) applyRegisterFileStruct(p RegisterFilePayload, logIndex uint64) interface{} {
-	// Validate the path BEFORE any state mutation. See GHSA-f85q-mvg8-qf37:
+	// Validate the path BEFORE any state mutation:
 	// historically the only check was empty-string, which let an attacker
 	// register arbitrary paths (/etc/passwd, s3://attacker-bucket/..., etc.)
 	// into the authoritative manifest. ValidateManifestPath rejects every
-	// malicious shape from the audit (scheme, absolute, parent-traversal,
-	// NUL, oversize) plus the historical empty-string case.
+	// malicious shape (scheme, absolute, parent-traversal, NUL, oversize)
+	// plus the historical empty-string case.
 	if err := ValidateManifestPath(p.File.Path); err != nil {
 		return f.rejectManifestPath("register", p.File.Path, logIndex, err)
 	}
@@ -1161,7 +1159,7 @@ func (f *ClusterFSM) applyUpdateFileStruct(p UpdateFilePayload, logIndex uint64)
 	// payload with Path="/etc/passwd" would create a fresh entry at
 	// that path rather than mutating any pre-existing one). The end
 	// risk to operators is the same as in applyRegisterFile: a hostile
-	// path in f.files. See GHSA-f85q-mvg8-qf37.
+	// path in f.files.
 	if err := ValidateManifestPath(p.File.Path); err != nil {
 		return f.rejectManifestPath("update", p.File.Path, logIndex, err)
 	}
@@ -1265,7 +1263,7 @@ func (f *ClusterFSM) applyBatchFileOps(payload []byte, logIndex uint64) interfac
 	// and NO ops have side-effects. Without this pass, an attacker
 	// could place a legitimate op first and a malicious op second —
 	// the legitimate op would land before the loop hit the malicious
-	// one. See GHSA-f85q-mvg8-qf37 review notes.
+	// one.
 	//
 	// Delete ops are not validated here because applyDeleteFile only
 	// uses the path as a map key (delete of a non-existent key is a
@@ -1485,8 +1483,7 @@ func validatePermissionString(perms string) error {
 // from each token. The proposer is expected to normalise input but we
 // trim defensively here so a forgotten normalise step at the proposer
 // surfaces as a clean validation error (the verb itself was unknown)
-// rather than a confusing one (" write" vs "write")
-// round-2 review.
+// rather than a confusing one (" write" vs "write").
 func splitCSV(s string) []string {
 	if s == "" {
 		return nil
@@ -1902,7 +1899,7 @@ func (f *ClusterFSM) Restore(rc io.ReadCloser) error {
 	// Validate every restored manifest path. Entries that fail
 	// validation are LOGGED AT ERROR + SKIPPED (NOT added to f.files)
 	// and counted into rejectedPaths so operators can alert on a
-	// non-zero growth rate. See GHSA-f85q-mvg8-qf37. We deliberately
+	// non-zero growth rate. We deliberately
 	// continue restoring the rest of the snapshot rather than failing
 	// hard — a cluster boot blocked by a single malicious entry in a
 	// historical snapshot would be unrecoverable.
@@ -1918,7 +1915,6 @@ func (f *ClusterFSM) Restore(rc io.ReadCloser) error {
 		// would deserialize to nil pointers here. Without this skip,
 		// the secondary-index rebuild below (entry.Database) would
 		// panic — bricking the node's boot. Treat as a quarantine.
-		// r6.
 		if entry == nil {
 			f.incRejectedPaths()
 			f.logger.Error().
@@ -1970,7 +1966,6 @@ func (f *ClusterFSM) Restore(rc io.ReadCloser) error {
 	// silently overwriting the first — the loser stays in the primary
 	// map but is unreachable via the name index, the FSM is
 	// permanently inconsistent. Quarantine duplicates instead.
-	//.
 	restoredOrgNames := make(map[string]int64, len(snapshot.Organizations))
 	for id, entry := range snapshot.Organizations {
 		if entry == nil {
@@ -2000,7 +1995,6 @@ func (f *ClusterFSM) Restore(rc io.ReadCloser) error {
 	// Track (orgID, name) seen so far to enforce UNIQUE(org_id, name)
 	// during restore. Same defence as the org-name check above —
 	// symmetric to applyCreateTeam's UNIQUE enforcement.
-	// round 7 G25 (extended to the composite-key case).
 	restoredTeamsByOrgAndName := make(map[int64]map[string]int64)
 	for id, entry := range snapshot.Teams {
 		if entry == nil {
@@ -2143,8 +2137,7 @@ func (f *ClusterFSM) Restore(rc io.ReadCloser) error {
 	}
 	// Rebuild tokens + both secondary indices. The prefix index supports
 	// AuthManager.VerifyToken lookups; the name index supports O(1)
-	// uniqueness checks in applyCreateToken/applyUpdateToken
-	// review feedback).
+	// uniqueness checks in applyCreateToken/applyUpdateToken.
 	f.tokens = restoredTokens
 	f.tokensByPrefix = make(map[string][]int64, len(f.tokens))
 	f.tokensByName = make(map[string]int64, len(f.tokens))

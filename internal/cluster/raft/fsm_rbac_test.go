@@ -266,9 +266,9 @@ func TestApplyUpdateOrganization_NotFound(t *testing.T) {
 }
 
 // TestApplyUpdateOrganization_DuplicateNameInChangedFieldsKeepsIndexConsistent
-// pins Gemini PR #458 round 5 G20: a malformed payload that lists
-// "name" twice in ChangedFields must not corrupt organizationsByName.
-// Pre-round-5 behaviour: the first iteration of the loop mutated the
+// pins that a malformed payload listing "name" twice in ChangedFields
+// must not corrupt organizationsByName.
+// Before the fix: the first iteration of the loop mutated the
 // secondary index, the second iteration found the new name "already
 // exists", and the function rejected the entire update — leaving the
 // primary map untouched but the secondary index pointing the NEW name
@@ -370,10 +370,10 @@ func TestApplyCreateTeam_AllowsDuplicateNameAcrossOrgs(t *testing.T) {
 }
 
 // TestApplyUpdateTeam_DuplicateNameInChangedFieldsKeepsIndexConsistent
-// pins Gemini PR #458 round 5 G21: same FSM-corruption shape as the
-// org-level G20 test above, but for applyUpdateTeam's teamsByOrg
-// nested index. A malformed payload listing "name" twice in
-// ChangedFields must not desync the index from f.teams.
+// pins the same FSM-corruption shape as the org-level test above, but
+// for applyUpdateTeam's teamsByOrg nested index. A malformed payload
+// listing "name" twice in ChangedFields must not desync the index from
+// f.teams.
 func TestApplyUpdateTeam_DuplicateNameInChangedFieldsKeepsIndexConsistent(t *testing.T) {
 	fsm := newTestFSM()
 	orgID := applyOrCreate(t, fsm, "acme", 17)
@@ -965,11 +965,11 @@ func TestFSMSnapshot_RestoreSkipsOrphanedRBAC(t *testing.T) {
 	}
 }
 
-// TestFSMSnapshot_RestoreQuarantinesDuplicateOrgName pins Gemini PR
-// #458 round 7 G25: a corrupted snapshot with two orgs sharing a
-// name must not silently overwrite organizationsByName during the
-// index rebuild. The second-encountered duplicate is refused +
-// counted into rejectedRBAC; the first survives.
+// TestFSMSnapshot_RestoreQuarantinesDuplicateOrgName pins that a
+// corrupted snapshot with two orgs sharing a name must not silently
+// overwrite organizationsByName during the index rebuild. The
+// second-encountered duplicate is refused + counted into
+// rejectedRBAC; the first survives.
 func TestFSMSnapshot_RestoreQuarantinesDuplicateOrgName(t *testing.T) {
 	malformed := FSMSnapshot{
 		Nodes: map[string]*NodeInfo{},
@@ -1016,7 +1016,7 @@ func TestFSMSnapshot_RestoreQuarantinesDuplicateOrgName(t *testing.T) {
 }
 
 // TestFSMSnapshot_RestoreQuarantinesDuplicateTeamInOrg pins the
-// composite-key variant of G25 for teams: two teams with the same
+// composite-key case for teams: two teams with the same
 // (org_id, name) pair must not desync teamsByOrg.
 func TestFSMSnapshot_RestoreQuarantinesDuplicateTeamInOrg(t *testing.T) {
 	malformed := FSMSnapshot{

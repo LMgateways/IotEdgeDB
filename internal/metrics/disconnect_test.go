@@ -8,7 +8,7 @@ import (
 
 // TestIncQueryClientDisconnect covers the three valid paths plus the
 // silent-drop branch for an unknown label. The "silent drop" semantics
-// matter for #426: if a typo at a call site (e.g. "arrow-json" instead
+// matter: if a typo at a call site (e.g. "arrow-json" instead
 // of "arrow_json") were ever to land, we'd rather emit no count than
 // pollute the labelled time series with a malformed value.
 //
@@ -76,7 +76,7 @@ func TestPrometheusFormat_DisconnectMetric(t *testing.T) {
 }
 
 // TestPrometheusFormat_StorageMetrics locks all five storage counters into
-// the Prometheus text exposition format. Regression test for #349:
+// the Prometheus text exposition format. Regression test:
 // iedb_storage_reads_total and iedb_storage_read_bytes_total were tracked
 // (and present in the JSON snapshot) but missing from PrometheusFormat.
 func TestPrometheusFormat_StorageMetrics(t *testing.T) {

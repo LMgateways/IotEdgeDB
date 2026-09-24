@@ -220,7 +220,7 @@ const defaultQoS = 1
 
 // resolveQoS turns an optional QoS from a request into a concrete value: nil
 // (field omitted) becomes the default; an explicit value — including 0 — is
-// used as-is. This is the fix for #326: an explicit "qos": 0 must not be
+// used as-is. An explicit "qos": 0 must not be
 // rewritten to 1.
 func resolveQoS(qos *int) int {
 	if qos == nil {
@@ -234,7 +234,7 @@ func resolveQoS(qos *int) int {
 // Note: QoS is intentionally NOT defaulted here. By the time a Subscription
 // exists its QoS is already resolved from the create request via resolveQoS
 // (nil → defaultQoS, explicit value — including 0 — kept). Re-applying an
-// "if QoS == 0 { QoS = 1 }" rule here would reintroduce #326, silently turning
+// "if QoS == 0 { QoS = 1 }" rule here would silently turn
 // a persisted, explicitly-chosen QoS 0 back into 1 on any code path that
 // rebuilds-and-defaults a subscription.
 func (s *Subscription) SetDefaults() {

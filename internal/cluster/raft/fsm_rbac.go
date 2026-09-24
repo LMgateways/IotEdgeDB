@@ -681,10 +681,9 @@ func (f *ClusterFSM) applyCreateTeam(payload []byte, logIndex uint64) interface{
 	// UNIQUE(org_id, name) check via teamsByOrg. Defensive
 	// init-on-demand: both the missing-outer-key case AND a stored-nil
 	// inner-map case (which shouldn't happen but is symmetric with the
-	// guard in applyUpdateTeam — see internal review round 2 / Gemini
-	// round 2 G9). Writing to a nil map panics in Go, so the guard is
-	// belt-and-braces against any future code path that could leave the
-	// nested map in an inconsistent state.
+	// guard in applyUpdateTeam). Writing to a nil map panics in Go, so
+	// the guard is belt-and-braces against any future code path that
+	// could leave the nested map in an inconsistent state.
 	orgTeams, ok := f.teamsByOrg[entry.OrganizationID]
 	if !ok || orgTeams == nil {
 		orgTeams = make(map[string]int64)
@@ -748,8 +747,7 @@ func (f *ClusterFSM) applyUpdateTeam(payload []byte, logIndex uint64) interface{
 	// Stage index mutations and apply them only after the loop succeeds.
 	// Same shape as applyUpdateOrganization: a malformed payload with
 	// duplicate "name" entries in ChangedFields would otherwise leave
-	// teamsByOrg out of sync with the primary f.teams map. Gemini PR
-	// round 5.
+	// teamsByOrg out of sync with the primary f.teams map.
 	nameChanged := false
 	for _, field := range p.ChangedFields {
 		switch field {
@@ -892,7 +890,7 @@ func (f *ClusterFSM) applyCreateRole(payload []byte, logIndex uint64) interface{
 		return f.rejectRBAC("create_role", entry.ID, logIndex, fmt.Errorf("team %d not found", entry.TeamID))
 	}
 	// Defensive init-on-demand (symmetric with the other Create* apply
-	// functions — see comment in applyCreateTeam). Internal review round 2.
+	// functions — see comment in applyCreateTeam).
 	teamRoles, ok := f.rolesByTeam[entry.TeamID]
 	if !ok || teamRoles == nil {
 		teamRoles = make(map[int64]struct{})
@@ -1057,7 +1055,6 @@ func (f *ClusterFSM) applyCreateMeasurementPermission(payload []byte, logIndex u
 		return f.rejectRBAC("create_measurement_permission", entry.ID, logIndex, fmt.Errorf("role %d not found", entry.RoleID))
 	}
 	// Defensive init-on-demand (symmetric — see applyCreateTeam comment).
-	// Internal review round 2.
 	roleMPerms, ok := f.measurementPermsByRole[entry.RoleID]
 	if !ok || roleMPerms == nil {
 		roleMPerms = make(map[int64]struct{})
@@ -1164,7 +1161,7 @@ func (f *ClusterFSM) applyAddTokenToTeam(payload []byte, logIndex uint64) interf
 	}
 	// UNIQUE(token_id, team_id) via tokenMembershipsByPair.
 	// Defensive init-on-demand for all three nested maps (symmetric —
-	// see applyCreateTeam comment). Internal review round 2.
+	// see applyCreateTeam comment).
 	tokenPairs, ok := f.tokenMembershipsByPair[entry.TokenID]
 	if !ok || tokenPairs == nil {
 		tokenPairs = make(map[int64]int64)

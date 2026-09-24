@@ -66,10 +66,10 @@ func signedHeartbeat(secret, nodeID, cluster string) *protocol.Heartbeat {
 	return hb
 }
 
-// TestHandleHeartbeat_RejectsUnauthenticated is the regression test for
-// GHSA-p378-jp5r-gpgw: with a shared secret configured, a heartbeat carrying
-// no HMAC must NOT update the peer's state (an attacker must not be able to
-// spoof a node's health).
+// TestHandleHeartbeat_RejectsUnauthenticated is the regression test: with
+// a shared secret configured, a heartbeat carrying no HMAC must NOT update
+// the peer's state (an attacker must not be able to spoof a node's
+// health).
 func TestHandleHeartbeat_RejectsUnauthenticated(t *testing.T) {
 	c, peer := newHeartbeatTestCoordinator(t, "s3cret")
 

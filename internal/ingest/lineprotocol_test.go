@@ -609,7 +609,7 @@ func BenchmarkSplitOnDelimiter(b *testing.B) {
 
 // BenchmarkLineProtocolParser_ParseLine_Booleans exercises the boolean
 // parsing path, including mixed-case values that previously triggered
-// a strings.ToLower allocation on every field value (#338).
+// a strings.ToLower allocation on every field value.
 func BenchmarkLineProtocolParser_ParseLine_Booleans(b *testing.B) {
 	parser := NewLineProtocolParser()
 	// Mix of lowercase, uppercase, and mixed-case booleans

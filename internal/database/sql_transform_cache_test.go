@@ -199,7 +199,7 @@ func BenchmarkQueryCache_Set(b *testing.B) {
 }
 
 // BenchmarkQueryCache_Hash benchmarks the per-call key-hashing overhead — the
-// FNV-1a shard selection that replaced the old SHA256+hex key derivation (#331).
+// FNV-1a shard selection that replaced the old SHA256+hex key derivation.
 func BenchmarkQueryCache_Hash(b *testing.B) {
 	cache := NewQueryCache(time.Minute, 100)
 	testSQL := "SELECT * FROM mydb.cpu WHERE time > 1609459200000000 AND host = 'server01' GROUP BY time ORDER BY time DESC LIMIT 100"
@@ -213,7 +213,7 @@ func BenchmarkQueryCache_Hash(b *testing.B) {
 
 // TestQueryCache_DistinctKeysNoCollision verifies that different SQL strings are
 // stored as distinct entries even when they hash to the same shard — the map key
-// is the full SQL string, so there is no cross-query collision (#331). Uses many
+// is the full SQL string, so there is no cross-query collision. Uses many
 // distinct queries so some necessarily share a shard (pigeonhole: >16 keys).
 func TestQueryCache_DistinctKeysNoCollision(t *testing.T) {
 	cache := NewQueryCache(time.Minute, 100000)

@@ -31,7 +31,7 @@ const (
 	// anchors the per-entry truncated MAC tags (which are 8-byte
 	// session-keyed) against a full-strength HMAC so an attacker who
 	// somehow forges a stream-tag still gets caught at the next
-	// checkpoint. See GHSA-wfgr-8x84-22q7.
+	// checkpoint.
 	MsgReplicateCheckpoint byte = 0x14
 	// MsgReplicateError indicates a replication error
 	MsgReplicateError byte = 0x1F
@@ -57,7 +57,6 @@ type ReplicateEntry struct {
 	// at 19.9M records/sec ingest. The 8-byte truncation gives 2^-64
 	// forgery probability per entry; the periodic checkpoint message
 	// (MsgReplicateCheckpoint) is the full-strength backstop.
-	// See GHSA-wfgr-8x84-22q7 / CVE-2026-48106.
 	//
 	// Thread safety: the sender stamps Tag on a shallow copy of the
 	// shared *ReplicateEntry inside sendToReader (see sender.go),
@@ -75,7 +74,7 @@ type ReplicateEntry struct {
 // cluster shared secret. The receiver maintains its own running hash and
 // verifies the checkpoint against it; on mismatch the connection is
 // dropped. This is the full-HMAC backstop for the truncated per-entry
-// tag. See GHSA-wfgr-8x84-22q7 / CVE-2026-48106.
+// tag.
 type ReplicateCheckpoint struct {
 	// CumulativePayloadHashHex is the running SHA-256 over every entry
 	// payload observed on this connection since the handshake, hex-encoded.

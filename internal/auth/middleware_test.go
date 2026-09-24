@@ -228,7 +228,7 @@ func TestMiddleware_PublicPrefixes(t *testing.T) {
 }
 
 // TestMiddleware_PublicPrefixes_AnchoredMatch is the regression test for the
-// gemini-flagged anchoring gap. Before the fix, strings.HasPrefix(path, "/metrics")
+// anchoring gap. Before the fix, strings.HasPrefix(path, "/metrics")
 // would silently let /metricsX, /metrics-secret, /metricsadmin bypass auth —
 // any route happening to share the byte prefix slipped through. The fix
 // requires exact-equal or true-subdirectory (`prefix + "/"`) matching after
@@ -311,7 +311,7 @@ func TestMiddleware_PublicPrefixes_AnchoredMatch(t *testing.T) {
 }
 
 // TestMiddleware_PublicPrefixes_TrailingSlashNormalisation is the
-// regression test for the gemini-r2 finding: a configured prefix with a
+// regression test: a configured prefix with a
 // trailing slash (e.g. `/metrics/`) used to break the anchored match
 // because `prefix + "/"` produced `/metrics//`, which lexically matches
 // no real request path. The fix strips exactly one trailing slash from

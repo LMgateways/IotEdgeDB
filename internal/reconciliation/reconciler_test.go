@@ -1201,7 +1201,7 @@ func TestReconcile_RootWalkBoundsInitialDirListIteration(t *testing.T) {
 }
 
 func TestReconcile_ManualOverrideHonorsDryRunFalseEvenWithCfgDryRunOnly(t *testing.T) {
-	// Round-7 regression: previously Reconcile did
+	// Regression: previously Reconcile did
 	// `DryRun = dryRun || cfg.ManifestOnlyDryRun`, which silently forced
 	// every call into dry-run when the cfg knob was true. That defeats
 	// the manual API path: an operator hitting POST /trigger with
@@ -1275,9 +1275,9 @@ func TestReconcile_CronPathDryRunStillRespectsCfg(t *testing.T) {
 }
 
 func TestApplyDefaults_MaxRootWalkDatabasesZeroFromConfigDisablesRootWalk(t *testing.T) {
-	// Regression for gemini-code-assist round 6: a config-driven
-	// MaxRootWalkDatabases=0 (i.e. an operator setting it to 0 in
-	// iedb.toml) must reach the disabled state. Earlier rounds used
+	// Regression guard: a config-driven MaxRootWalkDatabases=0 (i.e. an
+	// operator setting it to 0 in iedb.toml) must reach the disabled
+	// state. An earlier version used
 	// `if c.MaxRootWalkDatabases == 0 { c.MaxRootWalkDatabases = 1000 }`
 	// which silently overrode operator intent. The new convention:
 	// `< 0` means "operator did not set this, fill default"; `0` means

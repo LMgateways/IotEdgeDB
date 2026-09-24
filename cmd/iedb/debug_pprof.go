@@ -54,8 +54,7 @@ const debugPprofIdleTimeout = 60 * time.Second
 // startDebugPprofIfEnabled starts an opt-in pprof HTTP server on a separate
 // listener when IEDB_DEBUG_PPROF is truthy. The listener is bound to
 // localhost by default and is NEVER attached to the public Fiber app —
-// that's the whole point of the gate. Closes audit finding #2 from
-// 2026-05-19 (GHSA-j93g-rp6m-j32m).
+// that's the whole point of the gate.
 //
 // When the env var is unset or evaluates to false, this is a no-op: pprof
 // handlers are not registered on this listener, no socket is opened, no

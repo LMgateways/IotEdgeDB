@@ -7,7 +7,6 @@ import (
 )
 
 // TestValidateManifestPath_RejectionMatrix covers every malicious shape
-// enumerated in GHSA-f85q-mvg8-qf37 (IEDB Enterprise audit X2, 2026-05-19)
 // plus close-shape variants. The test is table-driven and each row
 // asserts BOTH that the path is rejected AND that the rejection reason
 // (sentinel error) matches — so a future refactor that swallows the
@@ -19,7 +18,7 @@ func TestValidateManifestPath_RejectionMatrix(t *testing.T) {
 		path string
 		want error
 	}{
-		// Empty (pre-PR's only check; kept for completeness).
+		// Empty (the original only check; kept for completeness).
 		{"empty", "", ErrPathEmpty},
 
 		// Length cap.

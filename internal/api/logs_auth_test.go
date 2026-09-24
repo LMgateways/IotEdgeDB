@@ -49,7 +49,7 @@ func setupLogsAuthServer(t *testing.T) (*fiber.App, *auth.AuthManager, func()) {
 }
 
 // TestLogsEndpoint_RequiresAdmin is the regression test for
-// GHSA-m3qr-fvp4-78xj: GET /api/v1/logs was reachable unauthenticated because
+// /api/v1/logs: the endpoint was reachable unauthenticated because
 // it was registered among the public base routes before the global auth
 // middleware. It must now require an admin token.
 func TestLogsEndpoint_RequiresAdmin(t *testing.T) {

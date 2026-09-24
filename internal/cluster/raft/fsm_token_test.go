@@ -224,9 +224,9 @@ func TestApplyCreateToken_MaintainsPrefixIndex(t *testing.T) {
 	}
 }
 
-// Pins the tokensByName secondary index (Gemini #451 review feedback —
-// O(1) uniqueness check on apply). The index must be populated on
-// create, updated on rename, and cleared on delete. If any of those
+// Pins the tokensByName secondary index, which backs the O(1)
+// uniqueness check on apply. The index must be populated on create,
+// updated on rename, and cleared on delete. If any of those
 // drift, applyCreateToken's "name already exists" check goes wrong:
 // either false-positives (rejecting legit creates because a stale name
 // entry exists) or false-negatives (accepting duplicate names).
@@ -507,8 +507,7 @@ func TestFSMSnapshot_RoundTripsTokens(t *testing.T) {
 	if fsm2.TokenCount() != 3 {
 		t.Errorf("restored FSM should have 3 tokens, got %d", fsm2.TokenCount())
 	}
-	// Both secondary indices must be rebuilt from the restored tokens
-	// map. The name index is Gemini #451 review feedback.
+	// Both secondary indices must be rebuilt from the restored tokens map.
 	fsm2.mu.RLock()
 	prefixCount := len(fsm2.tokensByPrefix)
 	nameCount := len(fsm2.tokensByName)
@@ -521,12 +520,11 @@ func TestFSMSnapshot_RoundTripsTokens(t *testing.T) {
 	}
 }
 
-// Pins splitCSV's defensive whitespace trimming (Gemini #451 round-2
-// review). The proposer is expected to normalise, but the applier
-// trims anyway so a proposer typo surfaces as a clean validation
-// error instead of a confusing one. If anyone removes the trim,
-// validatePermissionString starts rejecting "read, write" with a
-// surprising " write"-not-allowed error.
+// Pins splitCSV's defensive whitespace trimming. The proposer is
+// expected to normalise, but the applier trims anyway so a proposer
+// typo surfaces as a clean validation error instead of a confusing
+// one. If anyone removes the trim, validatePermissionString starts
+// rejecting "read, write" with a surprising " write"-not-allowed error.
 func TestValidatePermissionString_ToleratesWhitespace(t *testing.T) {
 	cases := []struct {
 		in      string

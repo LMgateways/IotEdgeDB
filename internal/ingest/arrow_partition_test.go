@@ -697,7 +697,7 @@ func BenchmarkSortColumnsByKeys(b *testing.B) {
 }
 
 // TestHourBucketID verifies floor-division hour bucketing, including the
-// pre-epoch (negative) case that plain truncation gets wrong (#312). The
+// pre-epoch (negative) case that plain truncation gets wrong. The
 // invariant proved for every case: the bucket's hour, mapped back to a time
 // via hourIDToTime, is the hour that actually CONTAINS the timestamp —
 // i.e. hourIDToTime(bucket) <= t < hourIDToTime(bucket)+1h.
@@ -745,7 +745,7 @@ func TestHourBucketID(t *testing.T) {
 
 // TestGroupByHourPreEpoch verifies that groupByHour buckets pre-epoch
 // timestamps into the correct hour and that the bucket round-trips to the
-// correct pre-1970 partition path (#312).
+// correct pre-1970 partition path.
 func TestGroupByHourPreEpoch(t *testing.T) {
 	// 1969-12-31 23:30:00 UTC and 1969-12-31 23:45:00 UTC — both in the hour
 	// 1969-12-31 23:00, which is bucket -1.

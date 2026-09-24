@@ -95,8 +95,7 @@ func (p *CoordinatorAuthProposer) Propose(ctx context.Context, cmdType uint8, pa
 	// Caller's context wins if it cancels first; we merge via select.
 	// mergedCancel must be deferred so the watcher goroutine inside
 	// mergeContexts exits as soon as forwardApplyToLeader returns,
-	// rather than waiting up to forwardCtx's full timeout (Gemini
-	// .
+	// rather than waiting up to forwardCtx's full timeout.
 	mergedCtx, mergedCancel := mergeContexts(ctx, forwardCtx)
 	defer mergedCancel()
 	if err := p.coord.forwardApplyToLeader(mergedCtx, cmd); err != nil {
@@ -137,9 +136,9 @@ func wrapApplyError(err error) error {
 // goroutine per call even when forwardApplyToLeader returns
 // immediately.
 //
-// Earlier versions: parented on context.Background (round 1 → dropped
-// values; fixed in round 1); leaked the watcher goroutine on early
-// return (round 4 → returns CancelFunc; fixed here).
+// Earlier versions parented on context.Background (dropping
+// values) and leaked the watcher goroutine on early return; the
+// CancelFunc return fixes that.
 func mergeContexts(a, b context.Context) (context.Context, context.CancelFunc) {
 	merged, cancel := context.WithCancel(a)
 	go func() {

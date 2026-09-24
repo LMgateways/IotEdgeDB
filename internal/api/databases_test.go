@@ -870,7 +870,7 @@ func mustCreateToken(t *testing.T, am *auth.AuthManager, name, permissions strin
 }
 
 // TestDatabasesHandler_CreateRequiresAdmin is the regression test
-// for iedb#471. Before the fix, POST /api/v1/databases passed through
+// for the admin-check fix. Before the fix, POST /api/v1/databases passed through
 // the global any-valid-token middleware and accepted any token. A
 // read-scoped token could provision databases — a configuration-by-
 // privilege-escalation surface.

@@ -104,8 +104,7 @@ func NewMiddleware(config MiddlewareConfig) fiber.Handler {
 			// (`prefix + "/"`). Without this, a configured prefix `/metrics`
 			// also matches `/metricsX`, `/metrics-secret`, etc. — any route
 			// happening to share the same byte prefix would silently bypass
-			// auth. Matches the same shape gemini-code-assist flagged on
-			// deniedRoots check.
+			// auth. Matches the same shape as the deniedRoots check.
 			if reqPath == prefix || strings.HasPrefix(reqPath, prefix+"/") {
 				return c.Next()
 			}

@@ -244,9 +244,9 @@ func TestCompactionBridge_DeleteUnderlyingErrorSurfaces(t *testing.T) {
 }
 
 // TestCompactionBridge_NilCoordinatorPanicsAtConstruction documents the
-// post-review contract: nil coordinator is a programming error, not a
-// runtime condition. The constructor panics loudly so the bug is caught
-// at startup, not on the first bridge call.
+// contract: nil coordinator is a programming error, not a runtime
+// condition. The constructor panics loudly so the bug is caught at
+// startup, not on the first bridge call.
 func TestCompactionBridge_NilCoordinatorPanicsAtConstruction(t *testing.T) {
 	defer func() {
 		r := recover()

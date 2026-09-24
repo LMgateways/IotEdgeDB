@@ -23,7 +23,7 @@ const CacheInvalidatePath = "/api/v1/internal/cache/invalidate"
 // cmd/iedb/main.go construct it conditionally and skip Register
 // entirely otherwise.
 //
-// Closes audit finding #3 from 2026-05-19: the previous gate was a
+// The previous gate was a
 // static header (`X-IEDB-Internal: cache-invalidate`) which any
 // network-reachable caller could replay, forcing DuckDB's
 // cache_httpfs glob results to repopulate from S3 — cost

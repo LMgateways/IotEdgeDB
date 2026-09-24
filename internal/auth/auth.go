@@ -1045,8 +1045,7 @@ func (am *AuthManager) GetTokenByID(id int64) (*TokenInfo, error) {
 // UpdateToken updates token metadata.
 //
 // The context bounds the cluster-mode Raft proposal wait. In OSS mode
-// it's currently unused (single SQLite UPDATE statement)
-// round-3 review.
+// it's currently unused (single SQLite UPDATE statement).
 func (am *AuthManager) UpdateToken(ctx context.Context, id int64, name, description, permissions *string, expiresAt *time.Time) error {
 	// Cluster mode: propose via Raft with a ChangedFields list so the FSM
 	// applier knows which fields are "leave alone" vs "set to empty".
@@ -1188,8 +1187,7 @@ func (am *AuthManager) RevokeToken(ctx context.Context, id int64) error {
 }
 
 // RotateToken generates a new token value while keeping metadata. The
-// context bounds the cluster-mode Raft proposal wait
-// round-3 review.
+// context bounds the cluster-mode Raft proposal wait.
 func (am *AuthManager) RotateToken(ctx context.Context, id int64) (string, error) {
 	token, err := generateToken()
 	if err != nil {
@@ -1276,8 +1274,7 @@ func (am *AuthManager) ensureFirstToken(ctx context.Context, tokenValue, descrip
 		// applied a peer's proposal before ours).
 		//
 		// The backoff respects ctx so a shutdown signal during a
-		// pathological no-leader window doesn't block process exit (Gemini
-		// .
+		// pathological no-leader window doesn't block process exit.
 		const maxAttempts = 4
 		backoff := 250 * time.Millisecond
 		var err error
@@ -1351,8 +1348,7 @@ func (am *AuthManager) EnsureInitialToken(ctx context.Context) (string, error) {
 
 // CreateTokenWithValue creates a new API token using a caller-provided token value instead of generating one.
 // The value must be at least 32 characters long to ensure adequate entropy.
-// The context bounds the cluster-mode Raft proposal wait
-// round-3 review.
+// The context bounds the cluster-mode Raft proposal wait.
 func (am *AuthManager) CreateTokenWithValue(ctx context.Context, tokenValue, name, description, permissions string, expiresAt *time.Time) (string, error) {
 	if len(tokenValue) < 32 {
 		return "", fmt.Errorf("bootstrap token must be at least 32 characters long")

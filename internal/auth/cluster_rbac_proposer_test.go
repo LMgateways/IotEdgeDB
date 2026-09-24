@@ -529,11 +529,10 @@ func TestProposer_DeleteOrganization_CascadesInSQLite(t *testing.T) {
 	}
 }
 
-// TestProposer_DeleteNonExistent_ReturnsNotFound pins Gemini PR #458
-// round 8 G27: cluster-mode Delete of a non-existent entity must
-// return "not found" (not nil/200 OK) so the cluster path matches
-// the OSS path's behaviour. Covers all 5 Delete entry points
-// (org, team, role, mperm, membership).
+// TestProposer_DeleteNonExistent_ReturnsNotFound: cluster-mode Delete
+// of a non-existent entity must return "not found" (not nil/200 OK) so
+// the cluster path matches the OSS path's behaviour. Covers all 5
+// Delete entry points (org, team, role, mperm, membership).
 func TestProposer_DeleteNonExistent_ReturnsNotFound(t *testing.T) {
 	rm, _ := newRBACTestManager(t)
 	ctx := context.Background()
@@ -622,12 +621,11 @@ func TestProposer_CreateRole_RejectsUnknownTeam(t *testing.T) {
 	}
 }
 
-// TestProposer_CreateRole_ConcurrentIdenticalDistinctIDs pins Gemini
-// PR #458 round 9 G28: two concurrent identical CreateRole calls
-// must return DIFFERENT IDs to each caller — neither can read back
-// the other's row. The fix matches on created_at = proposer's now
-// in the read-back query; the proposer's now is monotonic-nanosecond
-// unique per call.
+// TestProposer_CreateRole_ConcurrentIdenticalDistinctIDs: two
+// concurrent identical CreateRole calls must return DIFFERENT IDs to
+// each caller — neither can read back the other's row. The fix matches
+// on created_at = proposer's now in the read-back query; the
+// proposer's now is monotonic-nanosecond unique per call.
 //
 // Pre-fix the read-back used ORDER BY created_at DESC LIMIT 1, so
 // the slower caller's read-back would return the faster caller's
@@ -680,13 +678,13 @@ func TestProposer_CreateRole_ConcurrentIdenticalDistinctIDs(t *testing.T) {
 	}
 }
 
-// TestProposer_CreateRole_NonUTCRoundTrip is a regression catcher for
-// issue #460. CI normally runs UTC, which masks a whole class of
-// timezone round-trip bugs: SQLite serialises time.Time using the
-// value's location, so a `WHERE created_at = ?` readback only matches
-// if both sides agree on timezone.
+// TestProposer_CreateRole_NonUTCRoundTrip is a regression catcher.
+// CI normally runs UTC, which masks a whole class of timezone
+// round-trip bugs: SQLite serialises time.Time using the value's
+// location, so a `WHERE created_at = ?` readback only matches if both
+// sides agree on timezone.
 //
-// PR #459 fixed the round-trip by making both sides UTC: the proposer
+// The round-trip is fixed by making both sides UTC: the proposer
 // via nextProposerTimestamp() and the FSM applier via .UTC() on every
 // time.Unix(0, entry.X) site in cluster_rbac_apply.go. This test
 // fails fast (no row returned by the readback → nil panic on role.ID,
@@ -760,7 +758,7 @@ func TestProposer_CreateRole_NonUTCRoundTrip(t *testing.T) {
 // This test forces time.Local to a non-UTC zone and asserts every
 // Create*'s returned `CreatedAt.Location()` is `time.UTC`. Drop the
 // `.UTC()` on any of the 7 OSS-path sites in rbac_manager.go and this
-// test fails. Issue #460.
+// test fails.
 func TestOSS_RBACWrites_StampUTC(t *testing.T) {
 	loc, err := time.LoadLocation("America/Argentina/Buenos_Aires")
 	if err != nil {
@@ -869,7 +867,7 @@ func TestOSS_RBACWrites_StampUTC(t *testing.T) {
 // see exactly what SQLite stored.
 //
 // Drop the `.UTC()` on cluster_apply.go's time.Unix sites and this
-// test catches it. Issue #460.
+// test catches it.
 func TestApply_TokenCreate_NonUTC(t *testing.T) {
 	loc, err := time.LoadLocation("America/Argentina/Buenos_Aires")
 	if err != nil {
@@ -1201,11 +1199,10 @@ func seedTokenRow(t *testing.T, rm *RBACManager) int64 {
 }
 
 // -----------------------------------------------------------------------------
-// readBackAfterPropose regression tests (Gemini PR #458 rounds 2/4
-// introduced the helper + the ctx-cancel arm; internal review round 2
-// flagged that neither is pinned). Use a deferred-apply proposer so the
-// FSM apply completes AFTER Propose returns — simulating the
-// follower-apply lag readBackAfterPropose is supposed to absorb.
+// readBackAfterPropose regression tests: pin the helper and the
+// ctx-cancel arm. Use a deferred-apply proposer so the FSM apply
+// completes AFTER Propose returns — simulating the follower-apply lag
+// readBackAfterPropose is supposed to absorb.
 // -----------------------------------------------------------------------------
 
 // deferredApplyProposer simulates the follower behaviour where Propose
@@ -1249,8 +1246,8 @@ func (f *deferredApplyProposer) Propose(ctx context.Context, cmdType uint8, payl
 	return nil
 }
 
-// TestReadBackAfterPropose_RetriesOnFollowerApplyLag pins the round-2
-// G3-G7 read-back retry: Propose returns before the apply lands, the
+// TestReadBackAfterPropose_RetriesOnFollowerApplyLag pins the read-back
+// retry: Propose returns before the apply lands, the
 // first scan hits sql.ErrNoRows, the helper retries within its backoff
 // window, and the second scan succeeds.
 func TestReadBackAfterPropose_RetriesOnFollowerApplyLag(t *testing.T) {
@@ -1281,9 +1278,9 @@ func TestReadBackAfterPropose_RetriesOnFollowerApplyLag(t *testing.T) {
 	}
 }
 
-// TestReadBackAfterPropose_HonoursCtxCancel pins the round-4 G14
-// ctx-cancel arm: a ctx cancelled mid-retry causes the helper to bail
-// with ctx.Err() rather than waiting through the full backoff window.
+// TestReadBackAfterPropose_HonoursCtxCancel pins the ctx-cancel arm:
+// a ctx cancelled mid-retry causes the helper to bail with ctx.Err()
+// rather than waiting through the full backoff window.
 func TestReadBackAfterPropose_HonoursCtxCancel(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "rbac-ctxcancel.db")
 	am, err := NewAuthManager(dbPath, 100*time.Millisecond, 100, zerolog.Nop())
@@ -1326,11 +1323,10 @@ func TestReadBackAfterPropose_HonoursCtxCancel(t *testing.T) {
 	}
 }
 
-// TestReadBackAfterPropose_PreCancelledCtxNoScans pins Gemini PR #458
-// round 6 G22: a ctx that is ALREADY cancelled before
-// readBackAfterPropose is called must not run even one Scan attempt.
-// Pre-round-6 the first iteration had d==0 and skipped the select arm
-// entirely, so one wasted Scan would still run.
+// TestReadBackAfterPropose_PreCancelledCtxNoScans: a ctx that is
+// ALREADY cancelled before readBackAfterPropose is called must not run
+// even one Scan attempt. Previously the first iteration had d==0 and
+// skipped the select arm entirely, so one wasted Scan would still run.
 //
 // We can't directly observe "Scan didn't run" through the helper's
 // public surface, but we can prove it via a side-channel: the

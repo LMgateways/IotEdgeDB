@@ -330,7 +330,7 @@ func (rm *RBACManager) ApplyCreateOrganization(entry ClusterOrganizationEntry) e
 			// — operators have already been told via the seed Warn that
 			// child rows are not auto-replicated and must be re-issued
 			// post-upgrade, so cascading them out is the intended
-			// outcome.review.
+			// outcome.
 			tx, txErr := rm.db.Begin()
 			if txErr != nil {
 				return fmt.Errorf("ApplyCreateOrganization: upgrade-seed tx begin: %w", txErr)
@@ -397,8 +397,7 @@ func (rm *RBACManager) ApplyUpdateOrganization(entry ClusterOrganizationEntry) e
 		// has no entry for this row anyway, and invalidating would
 		// force re-reads of stale state. The Error log + returned
 		// error surface the divergence to main.go's callback wrapper
-		// so the operator sees it. Phase A.1: design clarified after
-		// internal review.
+		// so the operator sees it. Phase A.1 clarified this design.
 		rm.logger.Error().
 			Int64("organization_id", entry.ID).
 			Str("name", entry.Name).

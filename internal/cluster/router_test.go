@@ -191,7 +191,7 @@ func TestRouterRoundRobinSelection(t *testing.T) {
 // fix: when no primary writer is designated (the always-true case in
 // shared-storage mode + the transient failover case in legacy mode),
 // RouteWrite's fallback distributes across all healthy writers via
-// selectWriter's round-robin, instead of the pre-PR1b "always pick
+// selectWriter's round-robin, instead of the previous "always pick
 // writers[0]" behaviour that defeated the load balancer.
 //
 // Writer rotation uses a separate index from reader rotation so the
@@ -238,7 +238,7 @@ func TestRouterRoundRobinWriterSelection(t *testing.T) {
 
 	t.Run("RouteWrite uses selectWriter when no primary designated", func(t *testing.T) {
 		// End-to-end check that RouteWrite's no-primary fallback goes
-		// through selectWriter (round-robin), not the pre-PR1b
+		// through selectWriter (round-robin), not the previous
 		// writers[0] always-pick. We can't easily observe which
 		// writer RouteWrite chose without standing up real backends,
 		// but we CAN observe that the writerIndex counter advances
@@ -464,7 +464,7 @@ func TestRouterStats(t *testing.T) {
 	}
 	// Both rotation counters surface in Stats — operators need parity
 	// between reader_index (since day 1) and writer_index (Pattern 2
-	// multi-writer, PR1b). The keys must be present even when the
+	// multi-writer). The keys must be present even when the
 	// rotation hasn't been used yet (value 0).
 	if _, ok := stats["reader_index"]; !ok {
 		t.Error("reader_index missing from Stats()")

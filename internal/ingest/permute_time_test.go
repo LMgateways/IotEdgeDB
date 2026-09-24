@@ -101,7 +101,7 @@ func TestPermuteByTime_Shapes(t *testing.T) {
 	}
 	// mkPreEpochMixed: interleaves negative (pre-1970) and positive micros out of order.
 	// Guards the radix sign-bit handling — without radixSortBias, negatives sort after
-	// positives. Line Protocol and MessagePack both accept pre-epoch timestamps (#312).
+	// positives. Line Protocol and MessagePack both accept pre-epoch timestamps.
 	mkPreEpochMixed := func(n int) []int64 {
 		out := make([]int64, n)
 		for i := range out {
@@ -134,7 +134,7 @@ func TestPermuteByTime_Shapes(t *testing.T) {
 		"realistic_64_runs":   mkRuns(128000, 64, 2),
 		"large_random":        mkRandom(50000, 3),      // radix path on disordered data
 		"narrow_second_range": mkNarrowRange(50000, 4), // all within ~1s: only low bytes vary (max pass-skipping)
-		"pre_epoch_mixed":     mkPreEpochMixed(50000),  // negative+positive micros (#312): radix sign-bit handling
+		"pre_epoch_mixed":     mkPreEpochMixed(50000),  // negative+positive micros: radix sign-bit handling
 		"all_negative":        mkAllNegative(50000),    // entirely pre-1970
 	}
 
@@ -153,7 +153,7 @@ func TestPermuteByTime_MatchesReference(t *testing.T) {
 	rng := rand.New(rand.NewSource(99))
 	for trial := 0; trial < 80; trial++ {
 		// Half the trials are large enough to take the radix path (n >= radixSkipThreshold),
-		// half are small (comparison-sort path). All include negative timestamps (#312).
+		// half are small (comparison-sort path). All include negative timestamps.
 		var n int
 		if trial%2 == 0 {
 			n = radixSkipThreshold + rng.Intn(5000)

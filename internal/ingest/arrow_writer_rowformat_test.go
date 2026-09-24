@@ -2,7 +2,7 @@ package ingest
 
 // End-to-end tests for row-format MessagePack ingest path.
 //
-// Regression guard for issue #401 — row-format writes to /api/v1/write/msgpack
+// Regression guard for row-format writes to /api/v1/write/msgpack
 // were silently dropped at flush with "no time data in batch" error.
 //
 // These tests exercise two flows:
@@ -141,13 +141,13 @@ func TestArrowBuffer_WriteRowFormat_DirectRecord(t *testing.T) {
 // TestArrowBuffer_WriteRowFormat_ViaDecoder — full path mirroring the HTTP
 // handler: raw msgpack → MessagePackDecoder.Decode → ArrowBuffer.Write →
 // flush. This is what the HTTP handler at /api/v1/write/msgpack does.
-// This is the actual issue #401 reproduction.
+// This is the actual reproduction.
 func TestArrowBuffer_WriteRowFormat_ViaDecoder(t *testing.T) {
 	buf, storage := createE2EArrowBuffer(t)
 	logger := zerolog.New(os.Stderr).Level(zerolog.DebugLevel)
 	decoder := NewMessagePackDecoder(logger)
 
-	// Construct the exact payload from issue #401: single bare row map.
+	// Construct the exact payload: single bare row map.
 	now := time.Now().UnixMicro()
 	payload := map[string]any{
 		"m": "row_test",

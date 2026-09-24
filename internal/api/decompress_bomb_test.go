@@ -14,12 +14,12 @@ import (
 )
 
 // TestDecompressZstdPooled_BombRejected_WithoutOOM is a regression
-// test for the round-4 gemini finding: the original implementation
-// used zstd.Decoder.DecodeAll, which grows its output buffer to fit
-// the entire decompressed stream regardless of the WithDecoderMaxMemory
-// setting (that option only bounds the decoder's per-frame window,
-// not the output buffer). A high-ratio compressed payload could OOM
-// the process before any post-hoc len(buf) check could fire.
+// test: the original implementation used zstd.Decoder.DecodeAll, which
+// grows its output buffer to fit the entire decompressed stream
+// regardless of the WithDecoderMaxMemory setting (that option only
+// bounds the decoder's per-frame window, not the output buffer). A
+// high-ratio compressed payload could OOM the process before any
+// post-hoc len(buf) check could fire.
 //
 // The fix uses streaming Reset + io.LimitReader + io.ReadAll so the
 // decoded byte count is hard-bounded during decoding. This test
@@ -91,11 +91,10 @@ func TestDecompressZstdPooled_RejectsBenignOversizedPayload(t *testing.T) {
 }
 
 // TestDecompressRequest_UncompressedRejectsOverCap is a regression
-// test for the round-6 gemini finding: the uncompressed branch of
-// decompressRequest had no maxSize check, so a multi-GB raw body
-// would be both accepted AND defensively copied, doubling the
-// allocation in the uncompressed-OOM vector. The fix applies the
-// same maxSize cap to all three branches.
+// test: the uncompressed branch of decompressRequest had no maxSize
+// check, so a multi-GB raw body would be both accepted AND defensively
+// copied, doubling the allocation in the uncompressed-OOM vector. The
+// fix applies the same maxSize cap to all three branches.
 func TestDecompressRequest_UncompressedRejectsOverCap(t *testing.T) {
 	const cap = 1024
 	rawBody := bytes.Repeat([]byte{'x'}, cap+1)
@@ -172,8 +171,8 @@ func TestDecompressZstdPooled_HappyPath_RoundTrip(t *testing.T) {
 // asserting the decoded string values are unchanged.
 //
 // The msgpack-columnar hot path benchmarks at 19M+ rec/s; the
-// defensive memcpy that gemini r2/r6 wanted everywhere costs ~5%
-// throughput on this path, so we keep this invariant load-bearing.
+// defensive memcpy applied everywhere would cost ~5% throughput on
+// this path, so we keep this invariant load-bearing.
 func TestMessagePackDecoder_CopiesStringFields_NoBodyAliasing(t *testing.T) {
 	// Build a minimal valid msgpack payload (row format) matching the
 	// decoder's expected shape. Strings go through the fork's

@@ -551,7 +551,7 @@ func TestRBACSeed_PopulatesOrgsFromLocalSQLite(t *testing.T) {
 	// AUTOINCREMENT counter past id=1 BEFORE creating the target org.
 	// This guarantees the pre-existing "preexisting" row lands at a
 	// non-1 AUTOINCREMENT id (e.g. 4) while the FSM proposer will stamp
-	// id=1 on its first apply — exercising the G1 upgrade-seed-accept
+	// id=1 on its first apply — exercising the upgrade-seed-accept
 	// path where the cluster id and local id genuinely differ. Without
 	// this nudge both ids coincide at 1 and the seed-accept branch
 	// never fires.
@@ -591,9 +591,9 @@ func TestRBACSeed_PopulatesOrgsFromLocalSQLite(t *testing.T) {
 
 	// Capture the pre-seed id on node A so we can assert the upgrade-seed
 	// re-alignment branch actually swapped the leader's local row to the
-	// FSM-stamped id. Gemini PR #458 flagged that without this, the
-	// leader's SQLite keeps the old AUTOINCREMENT id, every subsequent
-	// CreateTeam under the new cluster id fails the local FK check.
+	// FSM-stamped id. Without this, the leader's SQLite keeps the old
+	// AUTOINCREMENT id, every subsequent CreateTeam under the new cluster
+	// id fails the local FK check.
 	var preSeedID int64
 	if err := amA.GetDB().QueryRow(`SELECT id FROM rbac_organizations WHERE name = 'preexisting'`).Scan(&preSeedID); err != nil {
 		t.Fatalf("look up pre-seed AUTOINCREMENT id: %v", err)
@@ -609,7 +609,7 @@ func TestRBACSeed_PopulatesOrgsFromLocalSQLite(t *testing.T) {
 	// transaction (e.g. removing the DELETE in favour of UPDATE id=...)
 	// would silently leave pre-A.1 child rows attached to a now-empty
 	// parent id and the operator would discover the stranded rows in
-	// production. Internal review round 2.
+	// production.
 	now := time.Now()
 	res, err := amA.GetDB().Exec(`
 		INSERT INTO rbac_teams (organization_id, name, description, created_at, updated_at, enabled)
@@ -648,7 +648,7 @@ func TestRBACSeed_PopulatesOrgsFromLocalSQLite(t *testing.T) {
 		t.Fatalf("seeded org should be on node B; got %v", orgsB)
 	}
 
-	// G1 pin: the leader's local SQLite id must now equal the
+	// The leader's local SQLite id must now equal the
 	// FSM-stamped id (== node B's id). Without the upgrade-seed
 	// re-alignment branch in ApplyCreateOrganization, the leader keeps
 	// the old AUTOINCREMENT id and subsequent CreateTeam proposals fail
@@ -672,12 +672,12 @@ func TestRBACSeed_PopulatesOrgsFromLocalSQLite(t *testing.T) {
 		}
 	}
 
-	// H2 pin: the pre-A.1 child team we inserted directly into SQLite
+	// The pre-A.1 child team we inserted directly into SQLite
 	// must be cascade-deleted by SQLite ON DELETE CASCADE as a side
 	// effect of the realign transaction. The release notes claim this
 	// behaviour — without this assertion a future change that swaps
 	// DELETE for UPDATE would silently leave the pre-A.1 child stranded
-	// against a parent id that no longer exists. Internal review round 2.
+	// against a parent id that no longer exists.
 	if preSeedID != orgB.ID {
 		var lingering int
 		if err := amA.GetDB().QueryRow(`SELECT COUNT(*) FROM rbac_teams WHERE id = ?`, preSeedTeamID).Scan(&lingering); err != nil {
@@ -688,9 +688,9 @@ func TestRBACSeed_PopulatesOrgsFromLocalSQLite(t *testing.T) {
 		}
 	}
 
-	// G1 follow-on: subsequent CreateTeam under the FSM-stamped org id
-	// must succeed on BOTH nodes' SQLite (FK to rbac_organizations must
-	// resolve). This is the customer-visible failure Gemini caught.
+	// Subsequent CreateTeam under the FSM-stamped org id must succeed
+	// on BOTH nodes' SQLite (FK to rbac_organizations must resolve). A
+	// failure here is customer-visible.
 	team, err := rmA.CreateTeam(ctx, orgB.ID, &auth.CreateTeamRequest{Name: "post-seed-team"})
 	if err != nil {
 		t.Fatalf("G1 regression: CreateTeam under seeded org id=%d failed (likely local FK violation): %v", orgB.ID, err)

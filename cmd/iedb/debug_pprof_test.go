@@ -97,8 +97,8 @@ func TestStartDebugPprofIfEnabled_BindsAndServes(t *testing.T) {
 	// Lookup table, so pprof.Index alone would return 404 "Unknown
 	// profile" for them — they need explicit HandleFunc registrations
 	// next to pprof.Index. This sub-test prevents a future "simplification"
-	// that drops the explicit registrations (e.g. PR #443 review G3
-	// suggested it; empirically refuted).
+	// that drops the explicit registrations (a change that was suggested
+	// and empirically refuted).
 	//
 	// Skip /debug/pprof/profile and /debug/pprof/trace because those
 	// actively capture data over seconds; the test would either take

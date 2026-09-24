@@ -185,7 +185,7 @@ func TestBuildCompactionQuery_StandardMixedTimeType(t *testing.T) {
 	}
 }
 
-// TestBuildCompactionQuery_DedupTimeOnly is the #521 no-group-by CQ path against
+// TestBuildCompactionQuery_DedupTimeOnly is the no-group-by CQ path against
 // real DuckDB: NO tag columns, dedupTime=true. Two files carry the SAME "time"
 // (a window re-emitted twice by a crash-retry); dedup on time alone must collapse
 // them to exactly one row. Without the dedupTime flag these would both survive

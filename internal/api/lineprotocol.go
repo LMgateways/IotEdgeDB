@@ -387,8 +387,8 @@ func (h *LineProtocolHandler) GetStats() map[string]int64 {
 
 // decompressGzip was the LP-specific gzip decoder. It duplicated the
 // package-level decompressGzipPooled helper in tle.go (same pool,
-// same shape) — gemini round 4 finding. The method is now removed
-// and all call sites go through decompressRequest, which delegates
-// to decompressGzipPooled. Keeping this comment as a tombstone so
-// future code review sees the decision rather than wondering why LP
-// has its own pooled-gzip helper next door (it doesn't anymore).
+// same shape). The method is now removed and all call sites go
+// through decompressRequest, which delegates to decompressGzipPooled.
+// Keeping this comment as a tombstone so future code review sees the
+// decision rather than wondering why LP has its own pooled-gzip
+// helper next door (it doesn't anymore).

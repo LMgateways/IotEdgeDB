@@ -398,7 +398,7 @@ func (e *errAfterNBytes) Write(p []byte) (int, error) {
 func TestStreamArrowJSON_FlushErrorBreaksLoop(t *testing.T) {
 	// CheckedAllocator + AssertSize(t, 0) at the end of the test verifies
 	// that streamArrowJSON's break-on-Flush-error path doesn't leak Arrow
-	// memory. The buildArrowBatch helper now releases its builders (#427)
+	// memory. The buildArrowBatch helper now releases its builders
 	// so the only allocations live in the records themselves, which
 	// simpleRecordReader.Release frees. If a future edit forgets to
 	// release a record after the break, AssertSize will catch it.

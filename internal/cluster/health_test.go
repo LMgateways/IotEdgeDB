@@ -155,11 +155,11 @@ func TestHealth_ResetAllowsNextWarning(t *testing.T) {
 }
 
 // TestHealth_SeparateTimersForFlappingMisconfig is the regression test
-// for the Phase 4 security-review finding: if a cluster flaps between
-// "0 compactors" and "2 compactors" within the rate-limit window, BOTH
-// warnings must surface instead of one silencing the other via a shared
-// timer. Shared-timer design was the original bug; separate timers per
-// failure mode is the fix.
+// for Phase 4: if a cluster flaps between "0 compactors" and "2
+// compactors" within the rate-limit window, BOTH warnings must surface
+// instead of one silencing the other via a shared timer. Shared-timer
+// design was the original bug; separate timers per failure mode is the
+// fix.
 func TestHealth_SeparateTimersForFlappingMisconfig(t *testing.T) {
 	h, registry, logs := newTestHealthChecker(t, true)
 
@@ -203,7 +203,7 @@ func TestHealth_WarnRateLimitReleasesAfterInterval(t *testing.T) {
 	}
 
 	// Simulate the interval passing by rewinding the timer. Each failure
-	// mode has its own slot post-Phase-4 review fix; rewind the one used
+	// mode has its own slot since the Phase 4 fix; rewind the one used
 	// by the "no compactor elected" branch.
 	h.lastNoCompactorWarnAt.Store(time.Now().Add(-2 * compactorWarnInterval).UnixNano())
 	h.checkCompactorElected()

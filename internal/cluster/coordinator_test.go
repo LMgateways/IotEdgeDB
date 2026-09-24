@@ -141,7 +141,7 @@ func TestIsPrimaryWriter_SharedStorageMode_RaftNotStarted(t *testing.T) {
 	// Defensive: Stop is a no-op when n.running is false (Start was
 	// never called and no BoltDB stores / listener exist yet), so this
 	// holds no resources today. Adding the defer future-proofs against
-	// a refactor that adds Start() to the test. (Gemini PR #463 round 6.)
+	// a refactor that adds Start() to the test.
 	defer func() { _ = raftNode.Stop() }()
 
 	c := &Coordinator{
@@ -197,9 +197,9 @@ func TestIsPrimaryWriter_SharedStorageMode_IgnoresLegacyWriterState(t *testing.T
 // actual writers also trying to run, if they were writers and the
 // leader was a reader simultaneously).
 //
-// This is the row of the configuration matrix that the deep reviewer
-// flagged as B1. The fix is the `&& node.Role == RoleWriter` clause in
-// IsPrimaryWriter's SharedStorageMode branch.
+// This is the configuration-matrix row the fix targets: the
+// `&& node.Role == RoleWriter` clause in IsPrimaryWriter's
+// SharedStorageMode branch.
 //
 // The test can't easily construct a real Raft cluster where a reader
 // won the election, but it can construct a Coordinator with a non-
@@ -208,13 +208,13 @@ func TestIsPrimaryWriter_SharedStorageMode_IgnoresLegacyWriterState(t *testing.T
 // nearest reachable boundary: a RoleReader+RoleCompactor with
 // SharedStorageMode=true and a non-nil-but-not-started raftNode (which
 // reports IsLeader=false). The combination still returns false, which
-// is the property B1 requires.
+// is the property under test.
 //
 // The complementary property — "if the reader DID somehow become
 // leader, would the role check stop it?" — is verified by code
 // inspection: the SharedStorageMode branch only returns true when
 // BOTH conditions hold (IsLeader && Role==RoleWriter). The integration
-// smoke in PR1b exercises the full real-Raft scenario.
+// smoke exercises the full real-Raft scenario.
 func TestIsPrimaryWriter_SharedStorageMode_NonWriterLeaderRejected(t *testing.T) {
 	for _, role := range []NodeRole{RoleReader, RoleCompactor, RoleStandalone} {
 		t.Run(string(role), func(t *testing.T) {
@@ -228,7 +228,6 @@ func TestIsPrimaryWriter_SharedStorageMode_NonWriterLeaderRejected(t *testing.T)
 				t.Fatalf("raft.NewNode: %v", err)
 			}
 			// Defensive: see TestIsPrimaryWriter_SharedStorageMode_RaftNotStarted.
-			// (Gemini PR #463 round 6.)
 			defer func() { _ = raftNode.Stop() }()
 
 			c := &Coordinator{

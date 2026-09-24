@@ -68,7 +68,7 @@ type ReceiverConfig struct {
 	// replication handshake (MsgReplicateSync) and derive the per-
 	// connection session key for stream MAC tags. Required for
 	// authenticated replication; without it, the writer will refuse
-	// every connection. See GHSA-wfgr-8x84-22q7 / CVE-2026-48106.
+	// every connection.
 	SharedSecret string
 
 	// ClusterName is bound into the handshake HMAC so a leaked MAC from
@@ -221,8 +221,7 @@ func (r *Receiver) connectionLoop() {
 		// receiveLoop returns on read error (Connection closed,
 		// HMAC fail, malformed entry, etc.) without closing r.conn
 		// itself. Without this close, the next connect() would
-		// overwrite r.conn and leak the previous socket — flagged
-		// by Gemini round 1 on
+		// overwrite r.conn and leak the previous socket.
 		r.connected.Store(false)
 		r.mu.Lock()
 		if r.conn != nil {
@@ -249,9 +248,9 @@ func (r *Receiver) connect() error {
 
 	// Refuse-when-unconfigured: don't even dial if no shared secret is
 	// configured. The writer would reject every handshake anyway (see
-	// GHSA-wfgr-8x84-22q7 / coordinator.handleReplicateSync); failing
-	// here avoids burning a TCP connection and surfaces the
-	// misconfiguration on the reader's logs with the actual cause.
+	// coordinator.handleReplicateSync); failing here avoids burning a TCP
+	// connection and surfaces the misconfiguration on the reader's logs
+	// with the actual cause.
 	if r.cfg.SharedSecret == "" {
 		return fmt.Errorf("replication requires cluster.shared_secret to be configured")
 	}
@@ -261,7 +260,7 @@ func (r *Receiver) connect() error {
 		return fmt.Errorf("dial: %w", err)
 	}
 
-	// Build the authenticated sync request (GHSA-wfgr-8x84-22q7).
+	// Build the authenticated sync request.
 	// Nonce binds this handshake to a single attempt and seeds the
 	// per-connection session key via HKDF on both ends.
 	nonce, err := security.GenerateNonce()
@@ -345,7 +344,7 @@ func (r *Receiver) connect() error {
 
 // receiveLoop receives and processes entries from the writer.
 //
-// Stream authentication state (GHSA-wfgr-8x84-22q7) is held locally on
+// Stream authentication state is held locally on
 // the goroutine stack so it is reset on every reconnect:
 //
 //   - sessionKey is snapshotted from r.sessionKey once at the top
@@ -385,8 +384,8 @@ func (r *Receiver) receiveLoop() {
 	cumulativeHash := sha256.New()
 	// Reusable per-connection HMAC for entry-tag verification. Reset
 	// + reused on every entry, same pattern as the sender's
-	// reader.entryMAC (Gemini round 9). Saves the per-entry hmac.New
-	// allocation at IEDB's 200k+ entries/sec ingest rate.
+	// reader.entryMAC. Saves the per-entry hmac.New allocation at
+	// IEDB's 200k+ entries/sec ingest rate.
 	entryMAC := security.NewReplicationEntryHMAC(sessionKey)
 	for r.running.Load() {
 		select {
@@ -412,7 +411,7 @@ func (r *Receiver) receiveLoop() {
 			// ReadMessage wraps the underlying net error with
 			// fmt.Errorf("...: %w", err), so a plain type
 			// assertion would miss it — use errors.As to unwrap.
-			// Pre-X1 this incorrectly tripped a full reconnect
+			// Previously this incorrectly tripped a full reconnect
 			// every 30s on an idle stream.
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
@@ -434,7 +433,7 @@ func (r *Receiver) receiveLoop() {
 			// Stream-auth: verify the per-entry truncated MAC tag
 			// under the session key. A missing or mismatched tag is
 			// fatal — drop the connection rather than continue with
-			// a poisoned stream. See GHSA-wfgr-8x84-22q7.
+			// a poisoned stream.
 			if entry.Tag == "" {
 				r.totalErrors.Add(1)
 				llog.Error().
@@ -459,9 +458,8 @@ func (r *Receiver) receiveLoop() {
 			// Stack-allocate the decoded tag — hex.DecodeString
 			// would heap-allocate twice per entry (source + dest)
 			// at 200k+ entries/sec; hex.Decode into a fixed-size
-			// array eliminates the destination allocation, and
-			// Go optimises the []byte(entry.Tag) source conversion
-			// here. Gemini round 5 /
+			// array eliminates the destination allocation, and Go
+			// optimises the []byte(entry.Tag) source conversion here.
 			var tagBytes [security.ReplicationEntryTagLen]byte
 			if _, err := hex.Decode(tagBytes[:], []byte(entry.Tag)); err != nil {
 				r.totalErrors.Add(1)
@@ -543,7 +541,6 @@ func (r *Receiver) receiveLoop() {
 			// impossible). Both are fatal. Hard-fail on inequality
 			// so a desync surfaces in the log with a clear message
 			// rather than via the downstream hash mismatch.
-			//.
 			if cp.LastSequence != r.lastSeq.Load() {
 				r.totalErrors.Add(1)
 				llog.Error().
@@ -564,9 +561,8 @@ func (r *Receiver) receiveLoop() {
 			}
 			// Stack-allocate both hashes — hash.Hash.Sum(nil) and
 			// hex.DecodeString each heap-allocate; Sum(buf[:0])
-			// and hex.Decode reuse the stack arrays. (Gemini
-			// round 5 /The cumulativeHash itself
-			// keeps accumulating across checkpoints, so
+			// and hex.Decode reuse the stack arrays. The cumulativeHash
+			// itself keeps accumulating across checkpoints, so
 			// snapshotting via Sum doesn't disturb its state.
 			var ourHashBuf [sha256.Size]byte
 			ourHash := cumulativeHash.Sum(ourHashBuf[:0])
@@ -611,7 +607,6 @@ func (r *Receiver) receiveLoop() {
 			// connection (same posture as the other "stream is
 			// poisoned" branches: a writer that sends a malformed
 			// error frame is either misbehaving or tampered).
-			// Gemini round 7 /
 			errMsg, err := ParseError(payload)
 			if err != nil {
 				r.totalErrors.Add(1)
@@ -625,7 +620,6 @@ func (r *Receiver) receiveLoop() {
 			// the next reconnect re-handshakes with a fresh session
 			// key — continuing would process further entries on a
 			// stream the sender already declared unhealthy.
-			// Gemini round 8 /
 			r.totalErrors.Add(1)
 			llog.Error().
 				Str("code", errMsg.Code).
@@ -639,8 +633,7 @@ func (r *Receiver) receiveLoop() {
 			// frame. Continue would let the loop drift past
 			// further bytes that may also be desynced; safer to
 			// drop the connection and re-handshake so the stream
-			// state is reset (fresh session key, fresh cumulative
-			// hash). Gemini round 6 /
+			// state is reset (fresh session key, fresh cumulative hash).
 			r.totalErrors.Add(1)
 			llog.Warn().Uint8("msg_type", msgType).Msg("Unexpected message type; dropping connection")
 			return

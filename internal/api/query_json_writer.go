@@ -90,7 +90,6 @@ func mapColumnType(dbType string) colType {
 // them to logs / metrics / query-registry so operators see that the
 // stream truncated, instead of the previous behaviour of silently
 // `continue`'ing past Scan errors and reporting Complete(rowCount).
-// See review/query-path-criticals C5.
 //
 // Returned error sources:
 //   - ctx cancellation observed at a row boundary (timeout / client-
@@ -136,7 +135,7 @@ scanLoop:
 		// circuit instead of being silently absorbed by the next
 		// Scan/Err round (which the prior code did via `continue`).
 		// Non-blocking select with labeled break is the idiomatic Go
-		// cancellation pattern (gemini r1).
+		// cancellation pattern.
 		select {
 		case <-ctx.Done():
 			streamErr = fmt.Errorf("stream cancelled at row %d: %w", rowCount, ctx.Err())

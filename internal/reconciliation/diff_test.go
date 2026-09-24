@@ -161,8 +161,8 @@ func TestIsParquetCandidate(t *testing.T) {
 		{"db/_compaction_state/foo.parquet", false},
 		// Segment-aware filter: a measurement named with the
 		// _compaction_state substring must NOT be filtered out.
-		// Round-7 regression: previous strings.Contains check was
-		// too broad and silently hid real user data.
+		// The previous strings.Contains check was too broad and
+		// silently hid real user data.
 		{"db/m_compaction_state_logs/2026/04/27/12/x.parquet", true},
 		{"db/_compaction_state_legacy/m/2026/04/27/12/x.parquet", true},
 		{"db/m/2026/04/27/12/file_compaction_state_log.parquet", true},

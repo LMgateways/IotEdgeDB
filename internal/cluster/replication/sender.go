@@ -46,9 +46,9 @@ type SenderConfig struct {
 	// Logger for sender events
 	Logger zerolog.Logger
 	// SharedSecret is the cluster shared secret. Required to authenticate
-	// the replication stream (GHSA-wfgr-8x84-22q7); when empty the sender
-	// refuses every reader at AcceptReader time (refuse-when-unconfigured,
-	// matching coordinator.handleReplicateSync).
+	// the replication stream; when empty the sender refuses every reader
+	// at AcceptReader time (refuse-when-unconfigured, matching
+	// coordinator.handleReplicateSync).
 	SharedSecret string
 
 	// ClusterName is bound into the checkpoint HMAC so a leaked MAC from
@@ -75,7 +75,7 @@ type ReaderConnection struct {
 	cancelFunc context.CancelFunc
 	ctx        context.Context
 
-	// Stream authentication state (GHSA-wfgr-8x84-22q7). All four
+	// Stream authentication state. All four
 	// fields are protected by writeMu — every send path that touches
 	// them already holds it. sessionKey is the HKDF-derived per-
 	// connection key, entryMAC is a long-lived hmac.Hash keyed by
@@ -211,7 +211,7 @@ func (s *Sender) Stop() error {
 //     happened to acquire writeMu first), violating the protocol
 //     contract that the receiver reads MsgReplicateSyncAck as the
 //     first message. Receiver would log "unexpected message type"
-//     and tear down the handshake. Gemini round 4 finding.
+//     and tear down the handshake.
 //
 // PrepareReader is safe to call without external locking; it does its
 // own validation and returns a fully-constructed ReaderConnection
@@ -402,7 +402,7 @@ func (s *Sender) broadcastEntry(entry *ReplicateEntry) {
 // is independent of the per-connection session key, so reusing it is
 // safe). See ComputeReplicationEntryTagFromHash for the rationale.
 //
-// GHSA-wfgr-8x84-22q7: the entry is stamped with a per-entry truncated
+// The entry is stamped with a per-entry truncated
 // MAC tag using the per-connection session key, and every payload feeds
 // the running SHA-256 used by the periodic checkpoint message. After
 // CheckpointInterval entries the sender emits a MsgReplicateCheckpoint
@@ -430,15 +430,14 @@ func (s *Sender) sendToReader(reader *ReaderConnection, entry *ReplicateEntry, p
 	// the payload bytes themselves are NOT copied (and don't need
 	// to be — sender never mutates them).
 	//
-	// Gemini round 2 on the previous shared-pointer
-	// mutation as a latent race under parallelization.
+	// The previous shared-pointer mutation was a latent race under
+	// parallelization.
 	//
 	// We reuse reader.entryMAC (allocated once at PrepareReader
 	// time) instead of building a fresh hmac.Hash per entry —
 	// hmac.New is one of the dominant allocations on the hot path
 	// at 200k+ entries/sec. The reuse is safe because writeMu
 	// serialises every sendToReader call for the same reader.
-	//.
 	entryCopy := *entry
 	var tag [security.ReplicationEntryTagLen]byte
 	security.ComputeReplicationEntryTagWithMAC(reader.entryMAC, entryCopy.Sequence, payloadHash, tag[:])
@@ -551,7 +550,7 @@ func (s *Sender) receiveLoop(reader *ReaderConnection) {
 			// activity). ReadMessage wraps the underlying net
 			// error with fmt.Errorf("...: %w", err), so a plain
 			// type assertion misses it — use errors.As to unwrap.
-			// Pre-X1 this dropped every reader connection every
+			// Previously this dropped every reader connection every
 			// 30s on an idle ack channel.
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {

@@ -46,7 +46,7 @@ func TestComputeHMAC_Determinism(t *testing.T) {
 }
 
 // TestJoinFamilyHMAC_LabelBinding_NoCrossMessageTypeReplay is the
-// critical security property for #504: a MAC computed with one
+// critical security property: a MAC computed with one
 // message-type label (join/leave/heartbeat) must NOT validate against
 // the verifier for a different message type, even with identical
 // (nonce, nodeID, clusterName, timestamp) inputs.
@@ -320,7 +320,7 @@ func TestValidateCacheInvalidateHMAC_FieldBinding(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
-// Replication protocol HMAC tests (GHSA-wfgr-8x84-22q7 / CVE-2026-48106)
+// Replication protocol HMAC tests
 // ----------------------------------------------------------------------
 
 // TestComputeReplicateSyncHMAC_Determinism pins the handshake MAC

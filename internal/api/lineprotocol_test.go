@@ -29,7 +29,7 @@ func TestIsValidMeasurementName(t *testing.T) {
 		{"contains colon", "cpu:usage", false},
 		{"contains at", "cpu@host", false},
 
-		// Invalid: control characters (the main fix for issue #122)
+		// Invalid: control characters (the main fix)
 		{"control char 0x01", "test\x01name", false},
 		{"control char 0x05", "test\x05name", false},
 		{"control char 0x08", "test\x08name", false},

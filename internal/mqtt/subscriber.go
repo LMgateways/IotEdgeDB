@@ -39,7 +39,7 @@ type Subscriber struct {
 	// Statistics. All updated on the message hot path without the mutex.
 	// lastMessageAtNanos holds the last-message time as Unix nanoseconds (0 =
 	// no message received yet); it was a mutex-guarded time.Time, which took a
-	// full lock on every received message (#328).
+	// full lock on every received message.
 	messagesReceived   atomic.Int64
 	messagesFailed     atomic.Int64
 	bytesReceived      atomic.Int64
@@ -167,7 +167,7 @@ func (s *Subscriber) GetStats() *SubscriptionStats {
 
 	// lastMessageAt lives in an atomic (off the message hot path). 0 nanos means
 	// no message received yet → leave the pointer nil so omitempty omits the
-	// field (#546). The 0 sentinel collides with the Unix epoch instant, but
+	// field. The 0 sentinel collides with the Unix epoch instant, but
 	// time.Now() never returns it in practice. Reconstruct in UTC to match the
 	// rest of IEDB's timestamps.
 	var lastMessageAt *time.Time

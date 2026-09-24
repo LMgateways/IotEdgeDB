@@ -81,11 +81,10 @@ func TestMaskFromKeywordsInFunctionBodies(t *testing.T) {
 			mustNotContainInnerFROM: []string{"FROM time"},
 		},
 		{
-			// Correctness review finding: ContainsFromKeywordFunction
-			// used strings.Index which returns only the first match. A
-			// column literally named extract_col next to a real EXTRACT
-			// call would hide the real call. Verify both detection AND
-			// mask work here.
+			// The ContainsFromKeywordFunction check used strings.Index,
+			// which returns only the first match. A column literally
+			// named extract_col next to a real EXTRACT call would hide
+			// the real call. Verify both detection AND mask work here.
 			name:                    "column prefixed extract_col next to real EXTRACT call",
 			input:                   "SELECT extract_col FROM t WHERE EXTRACT(YEAR FROM time) = 2025",
 			wantMasks:               1,
@@ -93,10 +92,9 @@ func TestMaskFromKeywordsInFunctionBodies(t *testing.T) {
 			mustNotContainInnerFROM: []string{"FROM time"},
 		},
 		{
-			// Correctness review finding: EXTRACT appearing AFTER the
-			// outer FROM/JOIN is the offset-shift corruption scenario
-			// for offset-based unmask. The placeholder approach must
-			// roundtrip cleanly here.
+			// EXTRACT appearing AFTER the outer FROM/JOIN is the
+			// offset-shift corruption scenario for offset-based unmask.
+			// The placeholder approach must roundtrip cleanly here.
 			name:                    "EXTRACT in WHERE after outer FROM",
 			input:                   "SELECT a FROM cpu WHERE EXTRACT(YEAR FROM ts) = 2024",
 			wantMasks:               1,
@@ -104,10 +102,10 @@ func TestMaskFromKeywordsInFunctionBodies(t *testing.T) {
 			mustNotContainInnerFROM: []string{"FROM ts"},
 		},
 		{
-			// Gemini finding: comment between function name and paren
-			// must not defeat the scanner. Verified to reproduce the
-			// original Binder Error against the live clickbench dataset
-			// before this fix.
+			// Comment between function name and paren must not defeat
+			// the scanner. Verified to reproduce the original Binder
+			// Error against the live clickbench dataset before this
+			// fix.
 			name:                    "block comment between EXTRACT and paren",
 			input:                   "SELECT EXTRACT /* c */ (YEAR FROM ts) FROM cpu",
 			wantMasks:               1,
@@ -129,20 +127,19 @@ func TestMaskFromKeywordsInFunctionBodies(t *testing.T) {
 			mustNotContainInnerFROM: []string{"FROM 1"},
 		},
 		{
-			// Gemini finding: backtick-quoted identifier is a column,
-			// not the EXTRACT builtin. DuckDB itself rejects backticks
-			// today, but the defensive check costs nothing.
+			// Backtick-quoted identifier is a column, not the EXTRACT
+			// builtin. DuckDB itself rejects backticks today, but the
+			// defensive check costs nothing.
 			name:      "backticked EXTRACT identifier is a column, not the builtin",
 			input:     "SELECT `EXTRACT`(a, b) FROM t",
 			wantMasks: 0,
 		},
 		{
-			// Gemini finding (round 2): subquery inside the trigger's
-			// argument list — the inner FROM must NOT be masked, or
-			// the regex rewriter cannot convert `cpu` to read_parquet.
-			// Verified to reproduce a "Table with name cpu does not
-			// exist" Catalog Error against the live clickbench dataset
-			// before this fix.
+			// Subquery inside the trigger's argument list — the inner
+			// FROM must NOT be masked, or the regex rewriter cannot
+			// convert `cpu` to read_parquet. Verified to reproduce a
+			// "Table with name cpu does not exist" Catalog Error
+			// against the live clickbench dataset before this fix.
 			name:                    "subquery FROM inside EXTRACT must not be masked",
 			input:                   "SELECT EXTRACT(YEAR FROM (SELECT MIN(ts) FROM cpu)) FROM events",
 			wantMasks:               1,
@@ -186,7 +183,7 @@ func TestMaskFromKeywordsInFunctionBodies(t *testing.T) {
 }
 
 // TestUnmaskAfterLengthChangingRewrite is the critical regression test for
-// the offset-shift corruption bug found in post-implementation review. The
+// the offset-shift corruption bug. The
 // caller masks, then runs a length-changing transformation (simulating
 // patternSimpleTable rewriting `FROM cpu` → `FROM read_parquet('long/path')`),
 // then unmasks. With offset-based unmask this corrupts the rewrite output;

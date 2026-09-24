@@ -830,9 +830,9 @@ func TestPullerMultiPeerAllFailMaxAttempts(t *testing.T) {
 // TestPullerMultiPeerCtxCanceledEarlyExit verifies that when the puller is
 // stopped mid-attempt, the peer fallback loop exits immediately on the
 // first context.Canceled error rather than iterating through every
-// remaining candidate. Regression test for the Gemini Phase 3 review
-// finding — without the explicit check, a 10-peer cluster would burn
-// 10 wasted dial attempts + 10 debug log lines during shutdown.
+// remaining candidate. Regression test for the early-exit behavior —
+// without the explicit check, a 10-peer cluster would burn 10 wasted
+// dial attempts + 10 debug log lines during shutdown.
 func TestPullerMultiPeerCtxCanceledEarlyExit(t *testing.T) {
 	backend := newFakeBackend()
 	fetcher := newPerPeerFetcher()
@@ -1320,7 +1320,7 @@ func TestPuller_FullyCaughtUp_FalseWhileCatchupBatchInflight(t *testing.T) {
 }
 
 // TestPuller_FullyCaughtUp_FalseAfterCatchupFailedPull covers the silent-
-// partial-results condition #392 closes: a walker-enqueued pull that
+// partial-results condition this closes: a walker-enqueued pull that
 // exhausted retries and gave up means the file is missing on this reader,
 // but processEntry's defer cleared the inflight slot. A naive "inflight==0"
 // predicate would say "ready" while data is missing. FullyCaughtUp must
@@ -1364,8 +1364,8 @@ func TestPuller_FullyCaughtUp_FalseAfterCatchupDroppedPull(t *testing.T) {
 	}
 }
 
-// TestPuller_FullyCaughtUp_IgnoresSteadyStateFailures covers the gemini
-// review finding (PR #419, MEDIUM) that gating on cumulative totalFailed /
+// TestPuller_FullyCaughtUp_IgnoresSteadyStateFailures covers a
+// MEDIUM-severity finding: gating on cumulative totalFailed /
 // totalDropped would keep the gate red forever after any transient
 // steady-state failure. The catch-up-scoped counters fix this: cumulative
 // failures/drops outside the catch-up batch must NOT close the gate once
@@ -1391,7 +1391,7 @@ func TestPuller_FullyCaughtUp_IgnoresSteadyStateFailures(t *testing.T) {
 }
 
 // TestPuller_FullyCaughtUp_IgnoresSteadyStateInflight covers the most
-// important behavioral change from the gemini review: in a busy cluster a
+// important behavioral change: in a busy cluster a
 // writer flushes files constantly, the puller enqueues steady-state pulls
 // continuously, and a naive "inflightCount == 0" predicate would mean the
 // reader returns 503 every few seconds in normal operation. The gate must
@@ -1496,8 +1496,7 @@ func TestPuller_InflightCount_MirrorsMap(t *testing.T) {
 
 // TestPuller_CatchUpFailure_SelfHeals verifies that a successful pull for
 // a previously-failed catch-up path decrements catchupFailed, so the gate
-// can clear without a process restart. Pins the recovery semantics gemini
-// flagged on the third review pass.
+// can clear without a process restart. Pins the recovery semantics.
 func TestPuller_CatchUpFailure_SelfHeals(t *testing.T) {
 	backend := newFakeBackend()
 	fetcher := newFakeFetcher(fakeFetchResult{body: []byte("ignored")})
@@ -1565,9 +1564,9 @@ func TestPuller_CatchUpFailure_RecordIsIdempotent(t *testing.T) {
 // TestPuller_CatchUpFailure_ConcurrentWorkerIsolation verifies that a
 // catchupFailed bump is attributable to the specific worker that hit the
 // give-up path, not to whichever worker happens to be in processEntry's
-// defer when ANY worker increments totalFailed. This is the bug gemini's
-// HIGH-priority finding caught: using totalFailed.Load() > snapshot would
-// cause cross-pollination between workers.
+// defer when ANY worker increments totalFailed. This was a HIGH-priority
+// bug: using totalFailed.Load() > snapshot would cause cross-pollination
+// between workers.
 //
 // The test exercises the helper directly rather than racing real workers
 // so it's deterministic. Pins the contract: catchupFailed only increments
@@ -1599,12 +1598,11 @@ func TestPuller_CatchUpFailure_ConcurrentWorkerIsolation(t *testing.T) {
 	}
 }
 
-// TestPuller_MarkCatchUp_DropCompensation pins the CRITICAL fix from PR
-// #419 review pass 4: when RunCatchUp pre-marks a path then Enqueue
-// returns "dropped" (queue full), the walker must unmark the catch-up
-// tag — otherwise no worker will ever run inflightRemove for that path,
-// catchupInflight leaks upward, and FullyCaughtUp never returns true
-// (gate permanently closed).
+// TestPuller_MarkCatchUp_DropCompensation pins the CRITICAL fix: when
+// RunCatchUp pre-marks a path then Enqueue returns "dropped" (queue full),
+// the walker must unmark the catch-up tag — otherwise no worker will ever
+// run inflightRemove for that path, catchupInflight leaks upward, and
+// FullyCaughtUp never returns true (gate permanently closed).
 func TestPuller_MarkCatchUp_DropCompensation(t *testing.T) {
 	p := newTestPuller(t, newFakeBackend(),
 		newFakeFetcher(fakeFetchResult{body: []byte("ignored")}),
@@ -1638,10 +1636,10 @@ func TestPuller_MarkCatchUp_DropCompensation(t *testing.T) {
 	}
 }
 
-// TestPuller_CatchUpDrop_SelfHeals pins the MEDIUM fix from PR #419
-// review pass 4: a catch-up drop must not require a process restart to
-// clear. When a reactive FSM callback later succeeds for a previously-
-// dropped path, catchupDropped decrements and the gate re-opens.
+// TestPuller_CatchUpDrop_SelfHeals pins the MEDIUM fix: a catch-up drop
+// must not require a process restart to clear. When a reactive FSM
+// callback later succeeds for a previously-dropped path, catchupDropped
+// decrements and the gate re-opens.
 func TestPuller_CatchUpDrop_SelfHeals(t *testing.T) {
 	p := newTestPuller(t, newFakeBackend(),
 		newFakeFetcher(fakeFetchResult{body: []byte("ignored")}),
@@ -1701,8 +1699,8 @@ func TestPuller_CatchUpDrop_RecordIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestPuller_ProcessEntry_LateCatchUpTag pins gemini's HIGH-priority race
-// fix from PR #419 review pass 5. Scenario:
+// TestPuller_ProcessEntry_LateCatchUpTag pins the HIGH-priority race fix.
+// Scenario:
 //
 //  1. A reactive FSM callback enqueues path X. Worker A starts processEntry.
 //  2. The catch-up walker starts iterating, sees X in the manifest, calls
@@ -1714,7 +1712,7 @@ func TestPuller_CatchUpDrop_RecordIsIdempotent(t *testing.T) {
 // now a catch-up path. inflightRemove decrements catchupInflight (which
 // markCatchUp incremented) but no failure is recorded — the file is
 // missing AND the gate clears. Silent partial results, exactly the
-// condition #392 closes.
+// condition this closes.
 //
 // Fixed (check-in-defer) behavior: defer reads isCatchUpPath at outcome
 // time, sees the late tag, calls recordCatchUpFailure. Gate stays red.
@@ -1774,7 +1772,7 @@ func TestPuller_ProcessEntry_LateCatchUpTag(t *testing.T) {
 }
 
 // TestPuller_CatchUpStatus_KeySemantics pins the API contract for
-// /api/v1/cluster/status: pre-#392 keys (failed, dropped, skipped_dup,
+// /api/v1/cluster/status: the legacy keys (failed, dropped, skipped_dup,
 // pulled) keep their original cumulative whole-puller-lifetime semantics
 // so existing dashboards don't silently lose visibility into steady-state
 // problems. New catchup_* keys carry the catch-up-batch-scoped values
@@ -1792,7 +1790,7 @@ func TestPuller_CatchUpStatus_KeySemantics(t *testing.T) {
 
 	status := p.CatchUpStatus()
 
-	// Pre-#392 keys must exist with cumulative semantics intact.
+	// The legacy keys must exist with cumulative semantics intact.
 	for _, k := range []string{"started_at", "completed_at", "entries_walked", "enqueued", "skipped_local", "skipped_dup", "pulled", "failed", "dropped"} {
 		if _, ok := status[k]; !ok {
 			t.Errorf("CatchUpStatus missing pre-#392 key %q", k)

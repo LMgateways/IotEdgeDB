@@ -101,11 +101,11 @@ func TestWriteCompletionManifest_RejectsEmptyJobID(t *testing.T) {
 }
 
 // TestWriteCompletionManifest_RejectsPathTraversalInJobID exhaustively
-// exercises every branch of validateJobID. Regression test for the
-// Phase 4 security-review finding: the original check only rejected
-// forward/back slashes, missing null bytes, "..", and leading dots.
-// All four branches must reject so a malicious or buggy upstream JobID
-// cannot escape the pending directory via filepath.Join.
+// exercises every branch of validateJobID. Regression test for
+// Phase 4: the original check only rejected forward/back slashes,
+// missing null bytes, "..", and leading dots. All four branches must
+// reject so a malicious or buggy upstream JobID cannot escape the
+// pending directory via filepath.Join.
 func TestWriteCompletionManifest_RejectsPathTraversalInJobID(t *testing.T) {
 	cases := []struct {
 		name       string

@@ -4,9 +4,8 @@ import "strings"
 
 // Cap and sample helpers used across the package. All four functions
 // share the same shape (cap a slice to a maximum length) so they live
-// together rather than next to whichever sweep first needed them —
-// gemini correctly flagged the cross-file helper placement as a
-// maintenance hazard.
+// together rather than next to whichever sweep first needed them:
+// the cross-file helper placement is a maintenance hazard.
 
 // appendBounded appends msg to s but caps the resulting slice at limit
 // entries. Used to keep Run.Errors and similar diagnostic slices from

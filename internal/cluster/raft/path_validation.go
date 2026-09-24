@@ -17,7 +17,7 @@ const MaxManifestPathLen = 4096
 // specific rejection reason via errors.Is.
 var (
 	// ErrPathEmpty: the path field is the empty string. This was the
-	// only check pre-PR.
+	// original only check.
 	ErrPathEmpty = errors.New("manifest path: empty")
 
 	// ErrPathTooLong: path exceeds MaxManifestPathLen bytes.
@@ -57,8 +57,7 @@ var (
 //
 // We don't enforce the exact partition format because compaction
 // output, retention rewrites, and future code paths can legitimately
-// differ. The checks below catch every malicious shape enumerated in
-// GHSA-f85q-mvg8-qf37 (IEDB Enterprise audit X2, 2026-05-19) without
+// differ. The checks below catch every malicious shape without
 // over-constraining what writers may produce.
 //
 // Checks are ordered from cheapest to most expensive so the common

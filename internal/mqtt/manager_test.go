@@ -84,7 +84,7 @@ func newTestManager(t *testing.T) *SubscriptionManager {
 	return NewSubscriptionManager(repo, encryptor, nil, zerolog.Nop())
 }
 
-// TestManager_Create_QoSZeroPersisted is the end-to-end #326 regression: an
+// TestManager_Create_QoSZeroPersisted is the end-to-end regression: an
 // explicit QoS 0 survives Create + the repository round-trip as 0, and an
 // omitted QoS becomes the default 1.
 func TestManager_Create_QoSZeroPersisted(t *testing.T) {

@@ -267,7 +267,7 @@ func TestPolicyStore_Update(t *testing.T) {
 }
 
 // TestPolicyStore_NegativeLookupCached verifies that a not-found lookup is
-// cached (#345). The proof is behavioral: after the first Get caches the
+// cached. The proof is behavioral: after the first Get caches the
 // negative, a row inserted directly via SQL (bypassing Set, so the cache
 // never learns) must stay invisible to subsequent Gets.
 func TestPolicyStore_NegativeLookupCached(t *testing.T) {
@@ -305,7 +305,7 @@ func TestPolicyStore_NegativeLookupCached(t *testing.T) {
 }
 
 // TestPolicyStore_SetOverridesCachedNegative verifies that Set invalidates a
-// previously cached not-found entry (#345).
+// previously cached not-found entry.
 func TestPolicyStore_SetOverridesCachedNegative(t *testing.T) {
 	store, cleanup := setupTestPolicyStore(t)
 	defer cleanup()
@@ -340,8 +340,8 @@ func TestPolicyStore_SetOverridesCachedNegative(t *testing.T) {
 	}
 }
 
-// TestPolicyStore_ListSkipsCachedNegatives is the regression test for the
-// review blocker on #345: List() dereferences every cache value, and a
+// TestPolicyStore_ListSkipsCachedNegatives is the regression test for an
+// earlier review blocker: List() dereferences every cache value, and a
 // cached negative (nil) must not panic it or appear in the listing.
 func TestPolicyStore_ListSkipsCachedNegatives(t *testing.T) {
 	store, cleanup := setupTestPolicyStore(t)
@@ -380,11 +380,11 @@ func TestPolicyStore_ListSkipsCachedNegatives(t *testing.T) {
 }
 
 // TestPolicyStore_CacheIfFreshSkipsAfterDelete is the deterministic
-// regression test for #499. It replays the racing interleaving: a Get read
-// the policy row from SQLite, then Delete removed the row and the cache
-// entry before the Get committed its (now stale) result. The generation
-// check must refuse the cache write — key-absence alone cannot distinguish
-// "just deleted" from "never cached".
+// regression test for the racing cache case. It replays the racing
+// interleaving: a Get read the policy row from SQLite, then Delete removed
+// the row and the cache entry before the Get committed its (now stale)
+// result. The generation check must refuse the cache write — key-absence
+// alone cannot distinguish "just deleted" from "never cached".
 func TestPolicyStore_CacheIfFreshSkipsAfterDelete(t *testing.T) {
 	store, cleanup := setupTestPolicyStore(t)
 	defer cleanup()

@@ -324,11 +324,11 @@ func TestClusterTokenEntryWire_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-// Pins the divergence-detection behaviour added in response to Gemini
-// #451 round-3: Apply{Update,Revoke,Rotate}Token must return an error
-// (and log at Error) when the local SQLite row is missing for an ID the
-// cluster FSM thinks exists. ApplyDeleteToken treats the same case as
-// a Warn-level no-op (the post-state matches, so it's not an error).
+// Pins the divergence-detection behaviour: Apply{Update,Revoke,Rotate}Token
+// must return an error (and log at Error) when the local SQLite row is
+// missing for an ID the cluster FSM thinks exists. ApplyDeleteToken
+// treats the same case as a Warn-level no-op (the post-state matches,
+// so it's not an error).
 func TestApplyXxxToken_DetectsLocalDivergence(t *testing.T) {
 	am, cleanup := setupTestAuthManager(t)
 	defer cleanup()

@@ -860,7 +860,7 @@ func TestFSMBatchFileOpsEmpty(t *testing.T) {
 }
 
 // TestApplyRegisterFile_RejectsMaliciousPath pins the security
-// property of GHSA-f85q-mvg8-qf37 across every malicious path shape:
+// property across every malicious path shape:
 // Apply returns an error, the entry does NOT land in f.files, and
 // the rejectedPaths counter increments. The error is delivered to
 // the proposer via future.Response(); during log replay it's
@@ -983,7 +983,7 @@ func TestApplyUpdateFile_RejectsMaliciousPath(t *testing.T) {
 // mutates an existing entry would leave the LSN at its
 // registration-time value, and downstream consumers that watch LSN
 // for "did this entry change" (e.g. compaction watchers) couldn't
-// distinguish a fresh state from a stale one. Gemini #446-r1 #1.
+// distinguish a fresh state from a stale one.
 func TestApplyUpdateFile_BumpsLSN(t *testing.T) {
 	t.Parallel()
 	fsm := newTestFSM()
@@ -1081,7 +1081,7 @@ func TestFSMRestore_QuarantinesMaliciousSnapshotEntries(t *testing.T) {
 // snapshot restore: a corrupted/crafted snapshot with `null` map
 // values must NOT panic the boot (would otherwise deref entry.Database
 // in the secondary-index rebuild). Nil entries are quarantined,
-// counter incremented, boot continues. Gemini #446-r6.
+// counter incremented, boot continues.
 func TestFSMRestore_HandlesNilFileEntry(t *testing.T) {
 	t.Parallel()
 	snapshot := FSMSnapshot{
@@ -1120,9 +1120,9 @@ func TestFSMRestore_HandlesNilFileEntry(t *testing.T) {
 // even mid-batch — NO ops from the batch have side-effects. The
 // pre-validation pass walks every Register/Update path before any
 // applyXxx is called, so the legit op BEFORE the malicious one does
-// NOT land. This closes the High finding from internal review:
-// without pre-validation, the leader's f.files would diverge from
-// "the malicious entry never replicates" claim in the release notes.
+// NOT land. This closes a High-severity finding: without
+// pre-validation, the leader's f.files would diverge from "the
+// malicious entry never replicates" claim in the release notes.
 func TestApplyBatchFileOps_RejectsMaliciousPath_AtomicPrevalidation(t *testing.T) {
 	t.Parallel()
 	fsm := newTestFSM()
@@ -1168,7 +1168,7 @@ func TestApplyBatchFileOps_RejectsMaliciousPath_AtomicPrevalidation(t *testing.T
 // CreatedAt requirement. Without this, a batch containing a legit op
 // followed by an op with zero CreatedAt would pass path-validation
 // pre-pass → the legit op would land in f.files → the second op
-// would fail mid-apply → batch atomicity violated. Gemini #446-r2.
+// would fail mid-apply → batch atomicity violated.
 func TestApplyBatchFileOps_RejectsZeroCreatedAt_AtomicPrevalidation(t *testing.T) {
 	t.Parallel()
 
@@ -1256,7 +1256,7 @@ func TestApplyBatchFileOps_RejectsZeroCreatedAt_AtomicPrevalidation(t *testing.T
 // Delete ops (unmarshal success + non-empty path). Without this, a
 // batch with [legit, delete-with-empty-path] would have applied the
 // legit op before applyDeleteFile rejected the second — violating
-// batch atomicity. Gemini #446-r4.
+// batch atomicity.
 func TestApplyBatchFileOps_RejectsEmptyDeletePath_AtomicPrevalidation(t *testing.T) {
 	t.Parallel()
 	fsm := newTestFSM()
@@ -1296,7 +1296,6 @@ func TestApplyBatchFileOps_RejectsEmptyDeletePath_AtomicPrevalidation(t *testing
 // TestApplyBatchFileOps_RejectsMalformedDeletePayload_AtomicPrevalidation
 // pins the second half of the Delete pre-check: if op.Payload doesn't
 // even unmarshal as a DeleteFilePayload, refuse the whole batch.
-// Gemini #446-r4.
 func TestApplyBatchFileOps_RejectsMalformedDeletePayload_AtomicPrevalidation(t *testing.T) {
 	t.Parallel()
 	fsm := newTestFSM()
@@ -1320,7 +1319,7 @@ func TestApplyBatchFileOps_RejectsMalformedDeletePayload_AtomicPrevalidation(t *
 }
 
 // TestApplyUpdateFile_RejectsZeroCreatedAt pins the standalone (non-batch)
-// path's CreatedAt requirement on Update. Gemini #446-r2.
+// path's CreatedAt requirement on Update.
 func TestApplyUpdateFile_RejectsZeroCreatedAt(t *testing.T) {
 	t.Parallel()
 	fsm := newTestFSM()

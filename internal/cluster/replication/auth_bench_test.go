@@ -1,4 +1,4 @@
-// Benchmarks for the GHSA-wfgr-8x84-22q7 stream-authentication path.
+// Benchmarks for the stream-authentication path.
 // Cost target was set by the user requirement: replication must not
 // regress measurably at IEDB's ingest profile (19.9M records/sec). The
 // fast path is the per-entry tag — checkpoints fire 1/1024 of the time

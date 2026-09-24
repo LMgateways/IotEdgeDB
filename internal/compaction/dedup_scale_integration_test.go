@@ -15,13 +15,13 @@ import (
 // TestBuildCompactionQuery_DedupMixedTimeAtScale is a DuckDB-backed regression
 // test for the live wedge that hit production/cpu/2026/06/18/03: a tagged
 // (dedup-branch) partition holding many TIMESTAMPTZ-time files plus one
-// VARCHAR-time file (from a pre-#493 writer), at the real cpu schema WIDTH
+// VARCHAR-time file (from an older writer), at the real cpu schema WIDTH
 // (host, time, value, cpu_idle, cpu_user — 5 columns).
 //
 // Why width matters: a plain CTE is not a materialization barrier, so above a
 // column-count threshold the dedup window's "time" reference fails to bind over
 // the raw union_by_name scan → `Failed to bind column reference "time":
-// TIMESTAMP WITH TIME ZONE != VARCHAR`. The original #493 dedup test used a
+// TIMESTAMP WITH TIME ZONE != VARCHAR`. The original dedup test used a
 // 3-column fixture and did NOT trip it, so it passed while real 5-column cpu
 // partitions stayed wedged. The fix is to materialize the normalized read into
 // a CREATE OR REPLACE TEMP TABLE before running the dedup window over it (see

@@ -289,7 +289,7 @@ func decompressRequest(rawBody []byte, maxSize int) (body []byte, codec string, 
 		// branches before making the defensive copy. Without this
 		// check, an uncompressed multi-GB body would be both accepted
 		// AND copied (the defensive copy is the OOM vector). Symmetric
-		// hardening per gemini round 6.
+		// hardening.
 		if len(rawBody) > maxSize {
 			return nil, "", fmt.Errorf("payload exceeds %s limit", formatBytes(int64(maxSize)))
 		}
@@ -385,7 +385,7 @@ func decompressZstdPooled(data []byte, maxSize int) ([]byte, error) {
 		// error — corrupted internal frame state can't be safely reset.
 		// Drop the decoder entirely (Close releases its goroutines and
 		// buffers) rather than risk poisoning the pool. The pool's Get()
-		// will allocate a fresh one on the next request. Per gemini r7.
+		// will allocate a fresh one on the next request.
 		decoder.Close()
 		return nil, fmt.Errorf("failed to decompress zstd: %w", err)
 	}

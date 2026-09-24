@@ -53,7 +53,7 @@ func setupLoggingAuthManager(t *testing.T) (*AuthManager, *syncBuffer) {
 	return am, logs
 }
 
-// Regression guard for #325: the last_used_at update must not outlive Close().
+// Regression guard: the last_used_at update must not outlive Close().
 //
 // Previously VerifyToken spawned a fire-and-forget goroutine running
 // db.Exec(UPDATE ...). A Close() that landed between the spawn and the Exec

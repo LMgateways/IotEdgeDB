@@ -163,8 +163,7 @@ func TestCreateToken(t *testing.T) {
 	// stored with NO OSS permissions (RBAC-only). Previously the auth manager
 	// re-defaulted any empty permission string to read,write, so a request for
 	// a least-privilege RBAC-only token was silently upgraded to wildcard
-	// read,write — a privilege-escalation-shaped bug surfaced while validating
-	// GHSA-93cm-2v4m-c56c.
+	// read,write — a privilege-escalation-shaped bug surfaced.
 	t.Run("PermissionsNone yields RBAC-only token (no OSS permissions)", func(t *testing.T) {
 		token, err := am.CreateToken(context.Background(), "rbac-only", "no OSS perms", PermissionsNone, nil)
 		if err != nil {

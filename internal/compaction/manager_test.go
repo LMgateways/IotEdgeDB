@@ -583,7 +583,7 @@ func TestManager_CleanupOrphanedTempDirs_NonExistentDir(t *testing.T) {
 }
 
 // TestSetOnCompactionCompleteConcurrent verifies the callback can be set
-// concurrently with job-completion reads without a data race (#351).
+// concurrently with job-completion reads without a data race.
 // main.go wires the callback after the schedulers have already started, so
 // the setter must synchronize with the read in CompactPartition. Run with
 // -race to catch regressions.

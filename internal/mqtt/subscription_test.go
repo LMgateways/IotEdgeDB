@@ -198,7 +198,7 @@ func TestResolveQoS(t *testing.T) {
 }
 
 // TestValidateCreateRequest_QoSZeroPreserved verifies the full create-request
-// mapping keeps an explicit QoS 0 (#326): the request maps to a Subscription
+// mapping keeps an explicit QoS 0: the request maps to a Subscription
 // whose QoS is 0, not silently rewritten to 1, and still validates.
 func TestValidateCreateRequest_QoSZeroPreserved(t *testing.T) {
 	base := func(qos *int) *CreateSubscriptionRequest {

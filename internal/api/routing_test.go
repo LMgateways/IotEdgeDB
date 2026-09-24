@@ -97,10 +97,9 @@ func TestBuildHTTPRequest_PreservesMultiValueHeaders(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	// X-Forwarded-For: three proxy hops. As a client-controlled
-	// forwarding header it is now STRIPPED at the forward boundary
-	// (CVE-2026-45045 class hardening) — the forwarding node re-sets a
-	// single trusted value from the socket peer in router.go. See
-	// clientForwardingHeaders.
+	// forwarding header it is now STRIPPED at the forward boundary —
+	// the forwarding node re-sets a single trusted value from the socket
+	// peer in router.go. See clientForwardingHeaders.
 	// Via: two proxies in the chain — NOT a forwarding/identity header,
 	// so it must still be preserved multi-value and in order.
 	req.Header.Add("X-Forwarded-For", "203.0.113.1")
@@ -122,7 +121,7 @@ func TestBuildHTTPRequest_PreservesMultiValueHeaders(t *testing.T) {
 
 	// Equal (not ElementsMatch): order matters for Via — it represents
 	// the sequential path of proxy hops. Multi-value preservation for
-	// non-forwarding headers is unchanged (Gemini PR #463 round 7).
+	// non-forwarding headers is unchanged.
 	assert.Equal(t,
 		[]string{"1.1 proxy1.example.com", "1.1 proxy2.example.com"}, capturedVia,
 		"Via values not preserved in chain order")
@@ -175,7 +174,7 @@ func TestBuildHTTPRequest_FiltersHopByHopAndContentLength(t *testing.T) {
 	req.Header.Set("Te", "trailers")
 	req.Header.Set("Trailers", "X-End-Of-Stream")
 	req.Header.Set("Upgrade", "h2c")
-	// Host filter (round 5): the upstream client's Host header would
+	// Host filter: the upstream client's Host header would
 	// shadow the target peer's req.Host for any middleware that reads
 	// req.Header.Get("Host") instead of req.Host. Note: httptest sets
 	// req.Host directly from the URL; we set the header via req.Header
@@ -200,7 +199,7 @@ func TestBuildHTTPRequest_FiltersHopByHopAndContentLength(t *testing.T) {
 	hopByHopFiltered := []string{
 		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
 		"Te", "Trailers", "Upgrade",
-		"Host", // round 5: filtered to keep req.Header consistent with req.Host
+		"Host", // filtered to keep req.Header consistent with req.Host
 	}
 	for _, h := range hopByHopFiltered {
 		assert.Empty(t, captured.Get(h),
@@ -350,12 +349,11 @@ func routerForRole(role cluster.NodeRole) *cluster.Router {
 
 }
 
-// TestForwardDecision_ClientCannotForceLocal pins the CVE-2026-45045-class
-// hardening on the loop guard: a client-supplied X-IEDB-Forwarded-By must
-// NOT let a caller force a node that cannot serve the request locally onto
-// a doomed local path. On a non-capable node a present marker yields
-// ForwardAlreadyForwarded (deterministic error), and on a capable node the
-// marker is ignored entirely.
+// TestForwardDecision_ClientCannotForceLocal pins the loop-guard hardening:
+// a client-supplied X-IEDB-Forwarded-By must NOT let a caller force a node
+// that cannot serve the request locally onto a doomed local path. On a
+// non-capable node a present marker yields ForwardAlreadyForwarded
+// (deterministic error), and on a capable node the marker is ignored entirely.
 func TestForwardDecision_ClientCannotForceLocal(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -404,7 +402,7 @@ func TestForwardDecision_ClientCannotForceLocal(t *testing.T) {
 
 // TestBuildHTTPRequest_StripsClientForwardingHeaders pins that every
 // client-controlled forwarding/identity header is removed at the forward
-// boundary (CVE-2026-45045 class). The forwarding node re-establishes the
+// boundary. The forwarding node re-establishes the
 // trusted values itself in internal/cluster/router.go.
 func TestBuildHTTPRequest_StripsClientForwardingHeaders(t *testing.T) {
 	app := fiber.New()

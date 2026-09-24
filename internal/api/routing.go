@@ -38,11 +38,11 @@ func isHopByHop(header string) bool {
 // X-Forwarded-For, X-IEDB-Forwarded-By, X-IEDB-Original-Host from the socket
 // peer and local node identity), so passing the client's copies through
 // would let a caller inject spoofed values a peer might log or, in future
-// code, trust — the same failure class as CVE-2026-45045 (X-Real-IP
-// spoofing). IEDB trusts none of these on the receive side today (identity
-// is derived only from the socket via fiber c.IP()); stripping them here
-// is defense-in-depth that keeps that property true regardless of what a
-// downstream node later chooses to read.
+// code, trust — the same failure class as X-Real-IP spoofing. IEDB trusts
+// none of these on the receive side today (identity is derived only from
+// the socket via fiber c.IP()); stripping them here is defense-in-depth
+// that keeps that property true regardless of what a downstream node later
+// chooses to read.
 //
 // Keys are in http.CanonicalHeaderKey form (the VisitAll callback
 // canonicalises before lookup).
@@ -162,8 +162,8 @@ func BuildHTTPRequest(c *fiber.Ctx) (*http.Request, error) {
 		// Strip client-controlled forwarding/identity headers. The
 		// forwarding node re-establishes the trustworthy values itself
 		// (router.go), so a client cannot inject spoofed X-Real-IP /
-		// X-Forwarded-* / X-IEDB-* onto the inter-node hop. Same class as
-		// CVE-2026-45045. See clientForwardingHeaders.
+		// X-Forwarded-* / X-IEDB-* onto the inter-node hop. See
+		// clientForwardingHeaders.
 		if isClientForwardingHeader(k) {
 			return
 		}

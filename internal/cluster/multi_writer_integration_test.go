@@ -4,15 +4,14 @@ package cluster
 //
 // Wires three real raft.Nodes (one bootstrap, two joiners) and three
 // minimal Coordinator literals with cfg.SharedStorageMode=true, then
-// verifies the load-bearing behaviours from PR1a end-to-end:
+// verifies the load-bearing behaviours end-to-end:
 //
 //   1. Initial state: the bootstrap writer is Raft leader →
 //      IsPrimaryWriter() returns true on writer-A, false on
 //      writer-B and writer-C.
-//   2. Role gate (B1 regression check): if writer-A's local role is
-//      mutated to RoleReader while still Raft leader, IsPrimaryWriter()
-//      flips to false. This is the B1 fix from PR1a internal review —
-//      a non-writer that wins Raft election must NOT run singleton
+//   2. Role gate: if writer-A's local role is mutated to RoleReader
+//      while still Raft leader, IsPrimaryWriter() flips to false — a
+//      non-writer that wins Raft election must NOT run singleton
 //      tasks.
 //   3. Leader change: stop writer-A's Raft node entirely; within a few
 //      seconds one of the remaining writers (writer-B or writer-C)
@@ -134,7 +133,7 @@ func waitFor(t *testing.T, timeout time.Duration, predicate func() bool, msg str
 }
 
 // TestMultiWriter_SharedStorageMode_LeaderElection_And_RoleGate is
-// the load-bearing integration test for PR1a's Pattern 2 multi-writer
+// the load-bearing integration test for Pattern 2 multi-writer
 // semantics. It runs a 3-node Raft cluster end-to-end and verifies
 // the three properties documented at the top of this file.
 //
@@ -225,9 +224,9 @@ func TestMultiWriter_SharedStorageMode_LeaderElection_And_RoleGate(t *testing.T)
 		t.Error("only the Raft leader should report IsPrimaryWriter()=true")
 	}
 
-	// --- Property 2: B1 regression — non-writer leader is rejected ---
+	// --- Property 2: non-writer leader is rejected ---
 	// Mutate writer-A's role to RoleReader while still Raft leader.
-	// The B1 fix in PR1a means IsPrimaryWriter() must flip to false:
+	// The fix means IsPrimaryWriter() must flip to false:
 	// only RoleWriter may run singleton tasks, even if elected leader.
 	coordA.localNode.Role = RoleReader
 	if coordA.IsPrimaryWriter() {

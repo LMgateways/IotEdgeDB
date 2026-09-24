@@ -774,7 +774,7 @@ func BenchmarkRowsToColumnar_SchemaVariation(b *testing.B) {
 }
 
 // TestMergeBatches_SparseColumns tests that mergeBatches handles schema evolution correctly
-// This reproduces Issue #130: panic during high-concurrency writes with different column sets
+// This reproduces the panic during high-concurrency writes with different column sets
 func TestMergeBatches_SparseColumns(t *testing.T) {
 	buffer := createTestArrowBuffer(t)
 

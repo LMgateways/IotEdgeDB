@@ -1,9 +1,9 @@
-// Round-trip tests for the GHSA-wfgr-8x84-22q7 / CVE-2026-48106
-// stream-authentication wiring: per-entry tag, periodic full-HMAC
-// checkpoint, and refuse-when-unconfigured on the sender. The receiver
-// side of the verification is exercised by re-running the same validate
-// functions the receiver uses, without spinning up a full Receiver
-// goroutine (which would otherwise need a live WAL writer).
+// Round-trip tests for the stream-authentication wiring: per-entry tag,
+// periodic full-HMAC checkpoint, and refuse-when-unconfigured on the
+// sender. The receiver side of the verification is exercised by
+// re-running the same validate functions the receiver uses, without
+// spinning up a full Receiver goroutine (which would otherwise need a
+// live WAL writer).
 package replication
 
 import (
