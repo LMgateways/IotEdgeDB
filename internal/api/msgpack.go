@@ -97,8 +97,13 @@ type MsgPackHandler struct {
 
 // NewMsgPackHandler creates a new MessagePack handler
 func NewMsgPackHandler(logger zerolog.Logger, arrowBuffer *ingest.ArrowBuffer, maxPayloadSize int64) *MsgPackHandler {
+	decoder := ingest.NewMessagePackDecoder(logger)
+	// Typed columnar fast path: enabled unless decimal columns are
+	// configured anywhere (decimal conversion is config-driven inside the
+	// generic conversion path; see ArrowBuffer.HasDecimalColumns).
+	decoder.SetTypedDecodeEnabled(!arrowBuffer.HasDecimalColumns())
 	return &MsgPackHandler{
-		decoder:        ingest.NewMessagePackDecoder(logger),
+		decoder:        decoder,
 		arrowBuffer:    arrowBuffer,
 		logger:         logger.With().Str("component", "msgpack-handler").Logger(),
 		maxPayloadSize: maxPayloadSize,
@@ -133,6 +138,13 @@ func (h *MsgPackHandler) extractMeasurements(records interface{}) []string {
 				seen[r.Measurement] = struct{}{}
 			}
 		case *models.ColumnarRecord:
+			if r.Measurement != "" {
+				seen[r.Measurement] = struct{}{}
+			}
+		case *ingest.TypedColumnarRecord:
+			// Typed decode fast path — MUST be listed here: a record type
+			// missing from this switch silently skips measurement-name
+			// validation and RBAC for its writes.
 			if r.Measurement != "" {
 				seen[r.Measurement] = struct{}{}
 			}
@@ -377,8 +389,7 @@ localProcessing:
 // decompressGzipPooled / decompressZstdPooled (in tle.go), used through
 // the shared decompressRequest helper. This keeps the LP, TLE, and
 // msgpack ingest paths on a single dispatch surface and consolidates
-// the streaming-LimitReader bomb-mitigation in one place. Removed in
-// gemini round 6.
+// the streaming-LimitReader bomb-mitigation in one place.
 //
 // PooledBuffer remains in the package because TestPooledBufferRelease
 // still exercises Release() idempotency. The decompressBufferPool /

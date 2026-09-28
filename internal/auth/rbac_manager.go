@@ -109,7 +109,7 @@ type RBACManager struct {
 	// proposerNowUnixNano holds the last UnixNano returned by
 	// nextProposerTimestamp(). It is updated via a CAS loop so two
 	// concurrent callers are guaranteed to receive strictly-increasing
-	// timestamps. Background: the round-9 G28 fix matches the
+	// timestamps. Background: the fix matches the
 	// CreateRole / CreateMeasurementPermission read-back by
 	// `created_at = proposer's now` to disambiguate concurrent identical
 	// creates. time.Now() alone can collide at the same nanosecond
@@ -119,8 +119,7 @@ type RBACManager struct {
 	// so concurrent callers get distinct, monotonic stamps. The
 	// trade-off is a sub-microsecond drift from wall clock under heavy
 	// concurrency, which is fine — `created_at` is "when the proposer
-	// issued this command," not "exact wall clock." Phase A.2 follow-up
-	// toG28.
+	// issued this command," not "exact wall clock." Phase A.2 follow-up.
 	proposerNowUnixNano atomic.Int64
 	// Shutdown
 	done chan struct{}
@@ -330,7 +329,7 @@ func (rm *RBACManager) CreateOrganization(ctx context.Context, req *CreateOrgani
 		// Propose returned — read-back is immediate. On a follower, the
 		// entry replicates asynchronously via the runFSM goroutine and
 		// may not have hit local SQLite yet, so we retry briefly on
-		// sql.ErrNoRows..
+		// sql.ErrNoRows.
 		rm.logger.Info().Str("name", req.Name).Msg("Created organization via Raft")
 		var org Organization
 		if err := readBackAfterPropose(ctx, func() error {
@@ -345,10 +344,9 @@ func (rm *RBACManager) CreateOrganization(ctx context.Context, req *CreateOrgani
 	}
 
 	// OSS path: direct SQLite. ExecContext so cancellation is honoured
-	// even on the standalone deployment..
+	// even on the standalone deployment.
 	// .UTC() for consistency with the cluster path (which goes through
 	// nextProposerTimestamp → UTC) and the rest of the auth surface.
-	//.
 	now := time.Now().UTC()
 	result, err := rm.db.ExecContext(ctx, `
 		INSERT INTO rbac_organizations (name, description, created_at, updated_at, enabled)
@@ -454,7 +452,6 @@ func (rm *RBACManager) UpdateOrganization(ctx context.Context, id int64, req *Up
 	}
 
 	// OSS path: direct SQLite. ExecContext honours ctx cancellation.
-	//.
 	var updates []string
 	var args []interface{}
 
@@ -516,7 +513,6 @@ func (rm *RBACManager) DeleteOrganization(ctx context.Context, id int64) error {
 		// pre-check might 404 for an org just-created elsewhere not
 		// yet replicated to us — that race window is sub-50ms and
 		// returning 404 honestly conveys "doesn't exist to me yet".
-		//.
 		org, err := rm.GetOrganization(id)
 		if err != nil {
 			return fmt.Errorf("failed to look up organization: %w", err)
@@ -619,7 +615,7 @@ func (rm *RBACManager) CreateTeam(ctx context.Context, orgID int64, req *CreateT
 
 	// OSS path. GetOrganization is a Get helper that does not currently
 	// thread ctx; the INSERT uses ExecContext so cancellation is at
-	// least honoured at the mutation site..
+	// least honoured at the mutation site.
 	// Verify organization exists
 	org, err := rm.GetOrganization(orgID)
 	if err != nil {
@@ -735,7 +731,7 @@ func (rm *RBACManager) UpdateTeam(ctx context.Context, id int64, req *UpdateTeam
 		return nil
 	}
 
-	// OSS path..
+	// OSS path.
 	var updates []string
 	var args []interface{}
 
@@ -790,7 +786,7 @@ func (rm *RBACManager) UpdateTeam(ctx context.Context, id int64, req *UpdateTeam
 func (rm *RBACManager) DeleteTeam(ctx context.Context, id int64) error {
 	if rm.getProposer() != nil {
 		// Pre-check for OSS-vs-cluster parity. See DeleteOrganization
-		// for rationale..
+		// for rationale.
 		team, err := rm.GetTeam(id)
 		if err != nil {
 			return fmt.Errorf("failed to look up team: %w", err)
@@ -825,7 +821,7 @@ func (rm *RBACManager) DeleteTeam(ctx context.Context, id int64) error {
 		return nil
 	}
 
-	// OSS path..
+	// OSS path.
 	result, err := rm.db.ExecContext(ctx, "DELETE FROM rbac_teams WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete team: %w", err)
@@ -868,8 +864,8 @@ func (rm *RBACManager) CreateRole(ctx context.Context, teamID int64, req *Create
 	}
 
 	if rm.getProposer() != nil {
-		// nextProposerTimestamp instead of time.Now(): the round-9
-		// G28 read-back disambiguator matches on `created_at = now`,
+		// nextProposerTimestamp instead of time.Now(): the read-back
+		// disambiguator matches on `created_at = now`,
 		// and two concurrent callers can collide at the same
 		// nanosecond on fast machines (race-detector-confirmed under
 		// 8-goroutine load). nextProposerTimestamp adds a monotonic
@@ -905,7 +901,7 @@ func (rm *RBACManager) CreateRole(ctx context.Context, teamID int64, req *Create
 		// process). This unambiguously identifies THIS caller's row
 		// even when an identical row was created concurrently. The FSM
 		// stamps the proposer-supplied CreatedAtUnixNano verbatim into
-		// SQLite..
+		// SQLite.
 		var role Role
 		var dbPerms string
 		if err := readBackAfterPropose(ctx, func() error {
@@ -921,7 +917,7 @@ func (rm *RBACManager) CreateRole(ctx context.Context, teamID int64, req *Create
 		return &role, nil
 	}
 
-	// OSS path..
+	// OSS path.
 	team, err := rm.GetTeam(teamID)
 	if err != nil {
 		return nil, err
@@ -1042,7 +1038,7 @@ func (rm *RBACManager) UpdateRole(ctx context.Context, id int64, req *UpdateRole
 		return nil
 	}
 
-	// OSS path..
+	// OSS path.
 	var updates []string
 	var args []interface{}
 
@@ -1082,7 +1078,7 @@ func (rm *RBACManager) UpdateRole(ctx context.Context, id int64, req *UpdateRole
 func (rm *RBACManager) DeleteRole(ctx context.Context, id int64) error {
 	if rm.getProposer() != nil {
 		// Pre-check for OSS-vs-cluster parity. See DeleteOrganization
-		// for rationale..
+		// for rationale.
 		role, err := rm.GetRole(id)
 		if err != nil {
 			return fmt.Errorf("failed to look up role: %w", err)
@@ -1098,7 +1094,7 @@ func (rm *RBACManager) DeleteRole(ctx context.Context, id int64) error {
 		return nil
 	}
 
-	// OSS path..
+	// OSS path.
 	result, err := rm.db.ExecContext(ctx, "DELETE FROM rbac_roles WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete role: %w", err)
@@ -1141,8 +1137,7 @@ func (rm *RBACManager) CreateMeasurementPermission(ctx context.Context, roleID i
 
 	if rm.getProposer() != nil {
 		// nextProposerTimestamp instead of time.Now() — same race fix
-		// as CreateRole; see comment there. Phase A.2 follow-up to PR
-		//..
+		// as CreateRole; see comment there. Phase A.2 follow-up.
 		now := rm.nextProposerTimestamp()
 		perms := strings.Join(req.Permissions, ",")
 		payload := createMeasurementPermissionPayloadWire{
@@ -1166,7 +1161,7 @@ func (rm *RBACManager) CreateMeasurementPermission(ctx context.Context, roleID i
 		// Same race fix as CreateRole — match on created_at = this
 		// proposer's now to disambiguate concurrent identical creates
 		// (no UNIQUE(role_id, measurement_pattern, permissions) in the
-		// schema)..
+		// schema).
 		var mp MeasurementPermission
 		var dbPerms string
 		if err := readBackAfterPropose(ctx, func() error {
@@ -1182,7 +1177,7 @@ func (rm *RBACManager) CreateMeasurementPermission(ctx context.Context, roleID i
 		return &mp, nil
 	}
 
-	// OSS path..
+	// OSS path.
 	role, err := rm.GetRole(roleID)
 	if err != nil {
 		return nil, err
@@ -1249,7 +1244,7 @@ func (rm *RBACManager) DeleteMeasurementPermission(ctx context.Context, id int64
 	if rm.getProposer() != nil {
 		// Pre-check for OSS-vs-cluster parity. No GetMeasurementPermission
 		// helper today, so inline the existence query. See
-		// DeleteOrganization for rationale..
+		// DeleteOrganization for rationale.
 		var exists int
 		err := rm.db.QueryRowContext(ctx,
 			`SELECT 1 FROM rbac_measurement_permissions WHERE id = ?`, id,
@@ -1268,7 +1263,7 @@ func (rm *RBACManager) DeleteMeasurementPermission(ctx context.Context, id int64
 		return nil
 	}
 
-	// OSS path..
+	// OSS path.
 	result, err := rm.db.ExecContext(ctx, "DELETE FROM rbac_measurement_permissions WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete measurement permission: %w", err)
@@ -1326,7 +1321,7 @@ func (rm *RBACManager) AddTokenToTeam(ctx context.Context, tokenID, teamID int64
 		return &mem, nil
 	}
 
-	// OSS path..
+	// OSS path.
 	team, err := rm.GetTeam(teamID)
 	if err != nil {
 		return nil, err
@@ -1365,7 +1360,7 @@ func (rm *RBACManager) AddTokenToTeam(ctx context.Context, tokenID, teamID int64
 func (rm *RBACManager) RemoveTokenFromTeam(ctx context.Context, tokenID, teamID int64) error {
 	if rm.getProposer() != nil {
 		// Pre-check for OSS-vs-cluster parity. See DeleteOrganization
-		// for rationale..
+		// for rationale.
 		var exists int
 		err := rm.db.QueryRowContext(ctx,
 			`SELECT 1 FROM rbac_token_memberships WHERE token_id = ? AND team_id = ?`,
@@ -1385,7 +1380,7 @@ func (rm *RBACManager) RemoveTokenFromTeam(ctx context.Context, tokenID, teamID 
 		return nil
 	}
 
-	// OSS path..
+	// OSS path.
 	result, err := rm.db.ExecContext(ctx, `
 		DELETE FROM rbac_token_memberships WHERE token_id = ? AND team_id = ?
 	`, tokenID, teamID)
@@ -2010,8 +2005,7 @@ func matchPattern(pattern, value string) bool {
 //
 // ctx is honoured between attempts via select on time.After + ctx.Done
 // so a cancelled / timed-out request doesn't keep the goroutine
-// blocked in time.Sleep.introduction) +
-// round 4 (ctx propagation).
+// blocked in time.Sleep.
 func readBackAfterPropose(ctx context.Context, scan func() error) error {
 	delays := []time.Duration{
 		0, // immediate
@@ -2029,7 +2023,7 @@ func readBackAfterPropose(ctx context.Context, scan func() error) error {
 		// alone misses: (a) first iteration has d==0 and skips the
 		// select, so a pre-cancelled ctx would still run one Scan; and
 		// (b) ctx cancelled while the previous iteration's Scan was
-		// in flight..
+		// in flight.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -2038,7 +2032,7 @@ func readBackAfterPropose(ctx context.Context, scan func() error) error {
 			// time.After leak (the underlying Timer can't be GC'd
 			// until it fires, even after ctx cancels). Under hot
 			// churn — many cancelled creates — the leaked timers
-			// pile up briefly..
+			// pile up briefly.
 			timer := time.NewTimer(d)
 			select {
 			case <-ctx.Done():
@@ -2084,7 +2078,7 @@ func (rm *RBACManager) countOrgCascadeDescendants(ctx context.Context, orgID int
 	).Scan(&teams); err != nil {
 		return 0, fmt.Errorf("count teams: %w", err)
 	}
-	// JOIN shape (Gemini round 1measurably outperforms
+	// JOIN shape measurably outperforms
 	// nested-IN at every fixture size we benched: 1.38x at small
 	// (~250 descendants), 1.27x at medium (~3.5k), 1.23x at large
 	// (~24k). Absolute cost stays sub-ms either way; readability is
@@ -2158,7 +2152,7 @@ var ErrNameConflict = errors.New("name already exists")
 // ErrInvalidName is the sentinel tagging validateName failures on the
 // organization and team create/update paths. HTTP handlers detect it via
 // errors.Is and map it to 400 Bad Request. Replaces the substring match
-// on "invalid organization name"/"invalid team name" added in #324.
+// on "invalid organization name"/"invalid team name" added earlier.
 var ErrInvalidName = errors.New("invalid name")
 
 // ErrInvalidRoleInput is the sentinel tagging CreateRole/UpdateRole and
@@ -2257,11 +2251,11 @@ func tagError(sentinel, err error) error {
 // timezones would produce different text representations of the same
 // instant, and the `created_at = ?` match would fall through. UTC
 // removes the variable so cross-node and cross-process matches are
-// byte-identical. (Gemini round 1
+// byte-identical.
 //
-// Phase A.2 follow-up toG28: the original fix
-// (matching readback on `created_at = time.Now()`) raced under
-// concurrent identical CreateRole calls on fast machines.
+// Phase A.2 follow-up: the original fix (matching readback on
+// `created_at = time.Now()`) raced under concurrent identical
+// CreateRole calls on fast machines.
 func (rm *RBACManager) nextProposerTimestamp() time.Time {
 	for {
 		prev := rm.proposerNowUnixNano.Load()

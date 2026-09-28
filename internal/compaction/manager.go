@@ -34,7 +34,8 @@ type Manager struct {
 	MaxFilesPerBatch int
 	MaxConcurrent    int
 	TempDirectory    string // Temp directory for compaction files
-	MemoryLimit      string // DuckDB memory limit for subprocess (e.g., "8GB")
+	MemoryLimit      string // DuckDB memory limit for EACH subprocess (e.g., "8GB")
+	Threads          int    // DuckDB thread count for EACH subprocess (0 = DuckDB default: all cores)
 	// Phase 4: local-disk directory where compaction subprocesses write
 	// completion manifests for the parent-side CompletionWatcher to pick
 	// up. Empty means "OSS mode, no completion-manifest handoff". Set by
@@ -67,8 +68,40 @@ type Manager struct {
 	// Used to invalidate DuckDB and query caches after files are deleted.
 	onCompactionComplete func()
 
-	logger zerolog.Logger
-	mu     sync.Mutex
+	// syncEligibility, when set, restricts compaction inputs to files the
+	// edge sync ledger reports delivered: compacting an
+	// undelivered raw would destroy the only copy of rows the hub never
+	// received. nil means unrestricted (edge sync absent or the operator
+	// opted out via edge_sync.spoke.defer_compaction_until_synced=false).
+	// Guarded by mu, like onCompactionComplete.
+	syncEligibility func(ctx context.Context, paths []string) (map[string]bool, error)
+
+	// namespaceExpander, when set, returns the top-level segments this node
+	// holds as an edge-sync HUB (the registered spoke IDs). The cycle
+	// replaces each matching top-level directory with {spoke}/{child}
+	// pseudo-databases so received data compacts like any other;
+	// candidates from pseudo-databases are SyncExempt. nil means no
+	// expansion. Guarded by mu.
+	namespaceExpander func(ctx context.Context) (map[string]struct{}, error)
+
+	// onConsumedInputs, when set, receives the storage keys of the SOURCE
+	// files each successful compaction actually consumed and deleted —
+	// j.compactedFiles across IPC, or manifest.InputFiles on the recovery
+	// path. The edge-sync hub marks the matching receipts compacted so the
+	// sync protocol keeps answering "present" for content that now lives
+	// inside an output. FALLIBLE: a non-nil error
+	// means the marks did not all commit, and the caller must KEEP the
+	// retained crash-recovery manifest so recovery re-fires them — deleting
+	// it anyway would silently lose the marks. Guarded by mu.
+	onConsumedInputs func(inputs []string) error
+
+	// onCompactedOutput, when set, receives the storage key of every
+	// compacted output the parent learns about — from a subprocess result
+	// AND from manifest crash-recovery — so the edge sync ledger can mark
+	// it as already-delivered content that must never sync.
+	onCompactedOutput func(storageKey string)
+	logger            zerolog.Logger
+	mu                sync.Mutex
 }
 
 // ManagerConfig holds configuration for creating a compaction manager
@@ -83,7 +116,8 @@ type ManagerConfig struct {
 	MaxFilesPerBatch int
 	MaxConcurrent    int
 	TempDirectory    string              // Temp directory for compaction files
-	MemoryLimit      string              // DuckDB memory limit for subprocess (e.g., "8GB")
+	MemoryLimit      string              // DuckDB memory limit for EACH subprocess (e.g., "8GB")
+	Threads          int                 // DuckDB thread count for EACH subprocess (0 = DuckDB default: all cores)
 	CompletionDir    string              // Phase 4: local-disk completion-manifest dir (empty = OSS mode)
 	SortKeysConfig   map[string][]string // Per-measurement sort keys from ingest config
 	DefaultSortKeys  []string            // Default sort keys from ingest config
@@ -134,6 +168,7 @@ func NewManager(cfg *ManagerConfig) *Manager {
 		MaxConcurrent:    cfg.MaxConcurrent,
 		TempDirectory:    cfg.TempDirectory,
 		MemoryLimit:      cfg.MemoryLimit,
+		Threads:          cfg.Threads,
 		CompletionDir:    cfg.CompletionDir,
 		SortKeysConfig:   sortKeysConfig,
 		DefaultSortKeys:  defaultSortKeys,
@@ -160,9 +195,16 @@ func NewManager(cfg *ManagerConfig) *Manager {
 		}
 		m.logger.Info().
 			Strs("tiers", enabledTiers).
+			Str("subprocess_memory_limit", m.MemoryLimit).
+			Int("subprocess_threads", m.Threads).
+			Int("max_concurrent", m.MaxConcurrent).
 			Msg("Compaction manager initialized with tiers")
 	} else {
-		m.logger.Info().Msg("Compaction manager initialized (no tiers)")
+		m.logger.Info().
+			Str("subprocess_memory_limit", m.MemoryLimit).
+			Int("subprocess_threads", m.Threads).
+			Int("max_concurrent", m.MaxConcurrent).
+			Msg("Compaction manager initialized (no tiers)")
 	}
 
 	return m
@@ -180,6 +222,176 @@ func (m *Manager) SetOnCompactionComplete(fn func()) {
 	m.onCompactionComplete = fn
 }
 
+// SetSyncEligibility installs the edge sync delivery gate.
+// A fail-closed placeholder may be installed at construction time and
+// swapped for the ledger-backed hook once the spoke ledger exists — a
+// scheduler tick during slow startup must never run unfiltered.
+func (m *Manager) SetSyncEligibility(fn func(ctx context.Context, paths []string) (map[string]bool, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncEligibility = fn
+}
+
+// SetOnCompactedOutput installs the compacted-output observer,
+// covering both delivery paths: subprocess results (CompactPartition) and
+// manifest crash-recovery (notifyCompactedOutput is handed to
+// RecoverOrphanedManifests per call, copied under mu there).
+func (m *Manager) SetOnCompactedOutput(fn func(storageKey string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onCompactedOutput = fn
+}
+
+// filterSyncEligibility drops candidate files the edge sync ledger has not
+// confirmed delivered, re-applying the TIER's MinFiles threshold to what
+// remains. Returns false when the partition should be deferred this cycle.
+// A hook error defers the whole candidate: the fail-safe direction is to
+// compact nothing rather than risk consuming undelivered rows.
+func (m *Manager) filterSyncEligibility(ctx context.Context, candidate Candidate, tier Tier) (Candidate, bool) {
+	if candidate.SyncExempt {
+		// Expander-produced spoke-namespace candidates: received data is
+		// never owed upstream (the node's own sync discovery excludes these
+		// namespaces for exactly that reason), so the delivery gate does not
+		// apply — without this bypass a dual-role node would defer every
+		// received partition forever.
+		return candidate, true
+	}
+	m.mu.Lock()
+	fn := m.syncEligibility
+	m.mu.Unlock()
+	if fn == nil {
+		return candidate, true
+	}
+
+	eligible, err := fn(ctx, candidate.Files)
+	if err != nil {
+		m.logger.Warn().Err(err).
+			Str("partition", candidate.PartitionPath).
+			Msg("Sync eligibility lookup failed; deferring this partition (fail-safe)")
+		return candidate, false
+	}
+
+	kept := make([]string, 0, len(candidate.Files))
+	for _, f := range candidate.Files {
+		if eligible[f] {
+			kept = append(kept, f)
+		}
+	}
+	deferred := len(candidate.Files) - len(kept)
+	if deferred > 0 {
+		m.logger.Info().
+			Str("partition", candidate.PartitionPath).
+			Str("tier", candidate.Tier).
+			Int("deferred", deferred).
+			Int("eligible", len(kept)).
+			Msg("Edge sync deferral: files await delivery before compaction")
+	}
+	if len(kept) < tier.GetMinFiles() {
+		return candidate, false
+	}
+	candidate.Files = kept
+	candidate.FileCount = len(kept)
+	return candidate, true
+}
+
+// SetNamespaceExpander installs the hub's spoke-namespace expansion.
+func (m *Manager) SetNamespaceExpander(fn func(ctx context.Context) (map[string]struct{}, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.namespaceExpander = fn
+}
+
+// SetOnConsumedInputs installs the consumed-inputs observer.
+func (m *Manager) SetOnConsumedInputs(fn func(inputs []string) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onConsumedInputs = fn
+}
+
+// notifyConsumedInputs invokes the consumed-inputs observer, if any. A
+// returned error means the receipt marks did not all commit.
+func (m *Manager) notifyConsumedInputs(inputs []string) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	m.mu.Lock()
+	fn := m.onConsumedInputs
+	m.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(inputs)
+}
+
+// expandNamespaces replaces registered spoke namespaces in a database list
+// with {spoke}/{child} pseudo-databases. A bare spoke directory
+// yields no candidates on its own (its children are databases, not
+// partition years), so it is dropped once expanded. Expander errors are
+// fail-safe: spoke top-level dirs are SKIPPED for this cycle (never
+// compacted unexpanded) and everything else proceeds.
+func (m *Manager) expandNamespaces(ctx context.Context, databases []string) []string {
+	m.mu.Lock()
+	fn := m.namespaceExpander
+	m.mu.Unlock()
+	if fn == nil {
+		return databases
+	}
+
+	spokes, err := fn(ctx)
+	if err != nil {
+		m.logger.Warn().Err(err).
+			Msg("Spoke-namespace lookup failed; skipping received namespaces this cycle (fail-safe)")
+		spokes = nil // fall through: unknown set, treat nothing as a spoke
+	}
+	if len(spokes) == 0 {
+		return databases
+	}
+
+	out := make([]string, 0, len(databases))
+	for _, db := range databases {
+		if _, isSpoke := spokes[db]; !isSpoke {
+			out = append(out, db)
+			continue
+		}
+		children, err := m.listMeasurements(ctx, db)
+		if err != nil {
+			m.logger.Warn().Err(err).Str("spoke", db).
+				Msg("Could not list a spoke namespace; skipping it this cycle")
+			continue
+		}
+		for _, child := range children {
+			out = append(out, db+"/"+child)
+		}
+	}
+	return out
+}
+
+// sanitizeDBForName maps a database name to a single path-safe token for
+// job IDs (which also name temp directories and cluster completion-manifest
+// files — validateJobID REJECTS path separators, and an unsanitized slash
+// would fail every spoke-namespace compaction post-upload in cluster mode).
+// The slash maps to "." — a character no legal IEDB database name may
+// contain (letter-first, then [A-Za-z0-9_-]), so a pseudo-database
+// "rocket-01/telemetry" can never collide with a real database named
+// "rocket-01_telemetry" in any name this produces. Plain names pass
+// through unchanged.
+func sanitizeDBForName(database string) string {
+	return strings.ReplaceAll(database, "/", ".")
+}
+
+// notifyCompactedOutput invokes the compacted-output observer, if any.
+func (m *Manager) notifyCompactedOutput(storageKey string) {
+	if storageKey == "" {
+		return
+	}
+	m.mu.Lock()
+	fn := m.onCompactedOutput
+	m.mu.Unlock()
+	if fn != nil {
+		fn(storageKey)
+	}
+}
+
 // FindCandidates finds partitions that are candidates for compaction across all databases
 func (m *Manager) FindCandidates(ctx context.Context) ([]Candidate, error) {
 	var candidates []Candidate
@@ -191,6 +403,7 @@ func (m *Manager) FindCandidates(ctx context.Context) ([]Candidate, error) {
 	if err != nil {
 		return nil, err
 	}
+	databases = m.expandNamespaces(ctx, databases)
 
 	m.logger.Info().Strs("databases", databases).Msg("Discovered databases for compaction")
 
@@ -265,7 +478,7 @@ func (m *Manager) CompactPartition(ctx context.Context, candidate Candidate) err
 	// — still unique against real batches, but a signal the invariant was
 	// bypassed.
 	jobID := fmt.Sprintf("%s_%s_%d_b%d",
-		candidate.Database,
+		sanitizeDBForName(candidate.Database),
 		strings.ReplaceAll(candidate.PartitionPath, "/", "_"),
 		time.Now().UnixNano(),
 		candidate.BatchNumber,
@@ -279,6 +492,7 @@ func (m *Manager) CompactPartition(ctx context.Context, candidate Candidate) err
 		BatchNumber:   candidate.BatchNumber,
 		TempDirectory: m.TempDirectory,
 		MemoryLimit:   m.MemoryLimit,
+		Threads:       m.Threads,
 		SortKeys:      m.GetSortKeys(candidate.Measurement),
 		StorageType:   m.StorageBackend.Type(),
 		StorageConfig: m.StorageBackend.ConfigJSON(),
@@ -290,6 +504,14 @@ func (m *Manager) CompactPartition(ctx context.Context, candidate Candidate) err
 		CompletionDir: m.CompletionDir,
 		PartitionTime: candidate.PartitionTime,
 	}
+	// When the hub observes consumed inputs, the subprocess leaves
+	// the crash-recovery manifest in place and THIS process deletes it after
+	// receipt marking commits — the manifest-before-storage discipline
+	// applied to bookkeeping: a crash in the window re-fires the marks via
+	// recovery instead of silently losing them.
+	m.mu.Lock()
+	config.ParentFinalizesManifest = m.onConsumedInputs != nil
+	m.mu.Unlock()
 
 	// Build extra environment variables for subprocess (storage credentials)
 	var extraEnv []string
@@ -314,7 +536,7 @@ func (m *Manager) CompactPartition(ctx context.Context, candidate Candidate) err
 	// The subprocess has its own defer cleanup, but if it crashes or gets OOM-killed,
 	// the defer never runs. This ensures cleanup happens from the parent process.
 	// Job temp dirs are named: {database}_{partition_path_with_underscores}_{timestamp}
-	partitionPrefix := candidate.Database + "_" + strings.ReplaceAll(candidate.PartitionPath, "/", "_") + "_"
+	partitionPrefix := sanitizeDBForName(candidate.Database) + "_" + strings.ReplaceAll(candidate.PartitionPath, "/", "_") + "_"
 	if entries, readErr := os.ReadDir(config.TempDirectory); readErr == nil {
 		for _, entry := range entries {
 			if entry.IsDir() && strings.HasPrefix(entry.Name(), partitionPrefix) {
@@ -328,11 +550,16 @@ func (m *Manager) CompactPartition(ctx context.Context, candidate Candidate) err
 		}
 	}
 
-	// Update metrics
-	shouldInvalidateCache := err == nil && result.Success
+	// Update metrics. Cache invalidation is gated on FilesCompacted > 0, not
+	// just success: a zero-file completion (all files already compacted, or a
+	// no-time-column skip) changed nothing on storage, and dropping the parquet
+	// metadata + query caches for it would cost every in-flight query a cold
+	// re-read — every cycle, for a partition that skips every cycle.
+	jobSucceeded := err == nil && result.Success
+	shouldInvalidateCache := jobSucceeded && result.FilesCompacted > 0
 
 	m.mu.Lock()
-	if shouldInvalidateCache {
+	if jobSucceeded {
 		m.totalJobsCompleted++
 		m.totalFilesCompacted += result.FilesCompacted
 		m.totalBytesSaved += (result.BytesBefore - result.BytesAfter)
@@ -380,6 +607,29 @@ func (m *Manager) CompactPartition(ctx context.Context, candidate Candidate) err
 	// and should not block stat reads or other concurrent compaction goroutines.
 	// The subprocess deleted old parquet files from storage, but DuckDB's
 	// cache_httpfs and parquet_metadata_cache still reference them.
+	// Edge sync compacted-output observer: record the output
+	// in the sync ledger before anything can discover it as a new file.
+	if jobSucceeded && result != nil {
+		m.notifyCompactedOutput(result.OutputFile)
+	}
+
+	// Consumed-inputs observer: mark edge-sync receipts for the
+	// sources this job deleted, THEN finalize the retained crash-recovery
+	// manifest — and ONLY if every mark committed. The surviving manifest is
+	// what makes the marks durable: recovery re-fires them idempotently, so
+	// on a mark failure (or a failed delete) the manifest must stay put.
+	if jobSucceeded && result != nil {
+		markErr := m.notifyConsumedInputs(result.CompactedInputs)
+		if result.ManifestPath != "" && m.ManifestManager != nil {
+			if markErr != nil {
+				m.logger.Warn().Err(markErr).Str("manifest", result.ManifestPath).
+					Msg("Receipt marking incomplete; keeping the compaction manifest so recovery re-fires the marks")
+			} else if err := m.ManifestManager.DeleteManifest(ctx, result.ManifestPath); err != nil {
+				m.logger.Warn().Err(err).Str("manifest", result.ManifestPath).
+					Msg("Could not finalize the compaction manifest; recovery re-fires the marks and retries the delete")
+			}
+		}
+	}
 	if shouldInvalidateCache && onComplete != nil {
 		onComplete()
 	}
@@ -581,7 +831,7 @@ func (m *Manager) runCycleInternal(ctx context.Context, filterDatabases []string
 	// Run manifest recovery before starting new compactions
 	// This ensures interrupted compactions from previous cycles are completed
 	if m.ManifestManager != nil {
-		recovered, err := m.ManifestManager.RecoverOrphanedManifests(ctx)
+		recovered, err := m.ManifestManager.RecoverOrphanedManifests(ctx, m.notifyCompactedOutput, m.notifyConsumedInputs)
 		if err != nil {
 			m.logger.Warn().Err(err).Msg("Manifest recovery encountered errors")
 		}
@@ -614,6 +864,7 @@ func (m *Manager) runCycleInternal(ctx context.Context, filterDatabases []string
 		}
 	}
 
+	databases = m.expandNamespaces(ctx, databases)
 	// Build database -> measurements map to avoid repeated lookups
 	dbMeasurements := make(map[string][]string)
 	for _, database := range databases {
@@ -689,12 +940,27 @@ func (m *Manager) runCycleInternal(ctx context.Context, filterDatabases []string
 
 				// Process this measurement's candidates immediately
 				for _, candidate := range candidates {
+					// A slash-carrying database is by construction a
+					// pseudo-database from the namespace expander — received
+					// data the delivery gate must not defer.
+					if strings.ContainsRune(candidate.Database, '/') {
+						candidate.SyncExempt = true
+					}
 					// Filter out files that are tracked by manifests (pending compaction)
 					filteredCandidate, shouldProcess := m.filterCandidateFiles(ctx, candidate)
 					if !shouldProcess {
 						m.logger.Debug().
 							Str("partition", candidate.PartitionPath).
 							Msg("Skipping candidate: all files are tracked by manifests")
+						continue
+					}
+					// Edge sync delivery gate: drop files the
+					// sync ledger has not confirmed delivered and re-check
+					// the tier's MinFiles on what remains. Deferring here is
+					// the design, not a failure — the partition compacts
+					// once its files have synced.
+					filteredCandidate, shouldProcess = m.filterSyncEligibility(ctx, filteredCandidate, tier)
+					if !shouldProcess {
 						continue
 					}
 
@@ -865,11 +1131,12 @@ func (m *Manager) listMeasurements(ctx context.Context, database string) ([]stri
 	// Extract unique measurement names from paths
 	measurementSet := make(map[string]struct{})
 	for _, obj := range objects {
-		// Path format: database/measurement/year/month/day/hour/file.parquet
-		parts := strings.Split(obj, "/")
-		if len(parts) >= 6 {
-			// parts[0] is database, parts[1] is measurement
-			measurement := parts[1]
+		rel, ok := strings.CutPrefix(obj, prefix)
+		if !ok {
+			continue
+		}
+		if i := strings.IndexByte(rel, '/'); i > 0 {
+			measurement := rel[:i]
 			if measurement != "" && measurement != "." {
 				measurementSet[measurement] = struct{}{}
 			}

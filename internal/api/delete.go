@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iedb/internal/cluster/raft"
+	sqlutil "iedb/internal/sql"
 	"iedb/internal/throttle"
 	"io"
 	"os"
@@ -144,6 +145,16 @@ var dangerousPunctuationPatterns = []string{
 // Dangerous keyword patterns for WHERE clause validation (word-boundary match)
 // Uses \b word boundaries to avoid false positives on column names like "offset", "payload", "dataset"
 var dangerousKeywordPattern = regexp.MustCompile(`(?i)\b(DROP|DELETE|INSERT|UPDATE|EXEC|EXECUTE|UNION|SELECT|CREATE|ALTER|COPY|ATTACH|DETACH|LOAD|INSTALL|PRAGMA|CALL|SET)\b`)
+
+var dangerousIOFunctionPattern = regexp.MustCompile(`(?i)\b(` + strings.Join([]string{
+	"read_parquet", "parquet_scan", "read_csv", "read_csv_auto",
+	"read_json", "read_json_auto", "read_ndjson", "read_ndjson_auto",
+	"read_text", "read_blob", "read_xlsx", "glob",
+	"parquet_metadata", "parquet_schema", "parquet_file_metadata",
+	"parquet_kv_metadata", "parquet_bloom_probe",
+	"delta_scan", "iceberg_scan", "iceberg_metadata", "iceberg_snapshots",
+	"iedb_partition_agg",
+}, "|") + `)\s*\(`)
 
 // Dangerous prefix patterns (match at word start)
 var dangerousPrefixPatterns = []string{
@@ -293,7 +304,7 @@ func (h *DeleteHandler) handleDelete(c *fiber.Ctx) error {
 	h.logger.Info().
 		Str("database", req.Database).
 		Str("measurement", req.Measurement).
-		Str("where", req.Where).
+		Str("where", sqlutil.ForLog(req.Where)).
 		Bool("dry_run", req.DryRun).
 		Msg("Processing delete request")
 
@@ -502,6 +513,13 @@ func (h *DeleteHandler) validateWhereClause(where string) (bool, error) {
 		return false, fmt.Errorf("WHERE clause contains forbidden keyword: %s", strings.ToUpper(match))
 	}
 
+	// Reject filesystem-I/O table functions (see dangerousIOFunctionPattern).
+	// Matched against the identifier-quote-stripped form so the quoted spelling
+	// `"glob"(...)`, which DuckDB executes identically, cannot slip past.
+	ioCheck := strings.NewReplacer(`"`, "", "`", "").Replace(where)
+	if m := dangerousIOFunctionPattern.FindStringSubmatch(ioCheck); m != nil {
+		return false, fmt.Errorf("WHERE clause contains forbidden file I/O function: %s()", m[1])
+	}
 	// Check for dangerous prefixes
 	for _, pattern := range dangerousPrefixPatterns {
 		if strings.Contains(whereUpper, pattern) {
@@ -784,7 +802,7 @@ func (h *DeleteHandler) rewriteLocalFile(ctx context.Context, filePath, _, where
 			ROW_GROUP_SIZE %d
 		)`, escapeDuckDBPath(filePath), whereClause, escapeDuckDBPath(tempFile), parquetRowGroupSize)
 
-	if _, err := db.ExecContext(ctx, copyQuery); err != nil {
+	if err := database.ExecPreservingInsertionOrder(ctx, db, copyQuery); err != nil {
 		os.Remove(tempFile)
 		return 0, fmt.Errorf("failed to write filtered data: %w", err)
 	}
@@ -857,7 +875,7 @@ func (h *DeleteHandler) rewriteS3File(ctx context.Context, s3Path, relativePath,
 			ROW_GROUP_SIZE %d
 		)`, escapeDuckDBPath(s3Path), whereClause, escapeDuckDBPath(tempPath), parquetRowGroupSize)
 
-	if _, err := db.ExecContext(ctx, copyQuery); err != nil {
+	if err := database.ExecPreservingInsertionOrder(ctx, db, copyQuery); err != nil {
 		return 0, nil, fmt.Errorf("failed to write filtered data: %w", err)
 	}
 

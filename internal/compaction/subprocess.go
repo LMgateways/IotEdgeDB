@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"strings"
@@ -36,9 +37,23 @@ type SubprocessJobConfig struct {
 	// Carried through so the subprocess can disambiguate the output filename
 	// between sibling batches (see Job.compactFiles). Zero means the job was
 	// not produced by SplitCandidateIntoBatches.
-	BatchNumber int      `json:"batch_number,omitempty"`
-	SortKeys    []string `json:"sort_keys"`    // Sort keys for ORDER BY in compaction
-	MemoryLimit string   `json:"memory_limit"` // DuckDB memory limit (e.g., "8GB")
+	BatchNumber int `json:"batch_number,omitempty"`
+	// ParentFinalizesManifest makes the subprocess LEAVE the crash-recovery
+	// storage manifest in place on full success, so the parent can mark
+	// edge-sync receipts for the consumed inputs and only then delete the
+	// manifest itself. Without this a parent crash between subprocess
+	// success and receipt marking silently loses the marks: the sync
+	// protocol later forgets the "stale" receipts and re-accepts re-uploaded
+	// raws next to the compacted output — permanent duplication. With it, a
+	// surviving manifest re-fires the marks through recovery (idempotent).
+	ParentFinalizesManifest bool     `json:"parent_finalizes_manifest,omitempty"`
+	SortKeys                []string `json:"sort_keys"`    // Sort keys for ORDER BY in compaction
+	MemoryLimit             string   `json:"memory_limit"` // DuckDB memory limit (e.g., "8GB")
+	// Threads is the DuckDB thread count for this subprocess. 0 means leave
+	// DuckDB at its default (all cores) — the parent normally sends the
+	// resolved compaction.threads value, so 0 only occurs for callers that
+	// predate the field.
+	Threads int `json:"threads,omitempty"`
 
 	// Storage configuration
 	StorageType   string `json:"storage_type"`   // "local" or "s3"
@@ -69,6 +84,15 @@ type SubprocessJobResult struct {
 	BytesBefore    int64  `json:"bytes_before"`
 	BytesAfter     int64  `json:"bytes_after"`
 	OutputFile     string `json:"output_file,omitempty"`
+	// CompactedInputs is the set of source files the job actually consumed
+	// and deleted (validated inputs only — corrupted files are skipped and
+	// LEFT in storage, and must keep their normal edge-sync receipts). The
+	// parent's consumed-inputs observer marks the matching receipts.
+	CompactedInputs []string `json:"compacted_inputs,omitempty"`
+	// ManifestPath is the crash-recovery storage manifest the subprocess
+	// left in place under ParentFinalizesManifest; empty otherwise. The
+	// parent deletes it after receipt marking commits.
+	ManifestPath string `json:"manifest_path,omitempty"`
 }
 
 // RunSubprocessJob is called from the subprocess to execute compaction.
@@ -118,6 +142,36 @@ func RunSubprocessJob(config *SubprocessJobConfig) (*SubprocessJobResult, error)
 		}
 	}
 
+	// Cap DuckDB threads. Without this every subprocess uses all cores, so
+	// concurrent compaction jobs compete with the parent's ingest/query work —
+	// and sort/scan buffers scale with threads, so this also bounds memory.
+	if config.Threads > 0 {
+		if _, err := db.Exec(fmt.Sprintf("SET threads=%d", config.Threads)); err != nil {
+			logger.Warn().Err(err).Int("threads", config.Threads).Msg("Failed to set DuckDB thread count")
+		} else {
+			logger.Info().Int("threads", config.Threads).Msg("DuckDB thread count configured")
+		}
+	}
+
+	// Point DuckDB's spill directory inside this job's own temp dir. An
+	// in-memory DuckDB defaults temp_directory to ".tmp" relative to the
+	// PARENT's cwd — unmanaged by compaction's cleanup and wrong if the
+	// operator moved compaction.temp_directory to a bigger volume. The job dir
+	// ({TempDirectory}/{JobID}) is already covered by both the subprocess's
+	// deferred cleanup and the parent's crash sweep (CompactPartition's
+	// partition-prefix walk), so spill files can never outlive the job.
+	// JobID is always set by the parent (CompactPartition); skip on the
+	// defensive empty case and keep DuckDB's default.
+	if config.JobID != "" {
+		spillDir := filepath.Join(config.TempDirectory, config.JobID, "duckdb-spill")
+		if err := os.MkdirAll(spillDir, 0700); err != nil {
+			logger.Warn().Err(err).Str("dir", spillDir).Msg("Failed to create DuckDB spill directory; keeping DuckDB default")
+		} else if _, err := db.Exec(fmt.Sprintf("SET temp_directory='%s'", escapeSQLString(spillDir))); err != nil {
+			logger.Warn().Err(err).Str("dir", spillDir).Msg("Failed to set DuckDB spill directory")
+		} else {
+			logger.Info().Str("dir", spillDir).Msg("DuckDB spill directory configured")
+		}
+	}
 	// Create manifest manager for crash recovery
 	manifestManager := NewManifestManager(backend, logger)
 
@@ -138,9 +192,10 @@ func RunSubprocessJob(config *SubprocessJobConfig) (*SubprocessJobResult, error)
 		// Phase 4: thread cluster-mode fields through to the job. When
 		// CompletionDir is empty (OSS / standalone), clusterMode() is
 		// false and the completion-manifest writes are no-ops.
-		JobID:         config.JobID,
-		CompletionDir: config.CompletionDir,
-		PartitionTime: config.PartitionTime,
+		JobID:                   config.JobID,
+		CompletionDir:           config.CompletionDir,
+		PartitionTime:           config.PartitionTime,
+		ParentFinalizesManifest: config.ParentFinalizesManifest,
 	})
 
 	// Use signal-aware context so the subprocess can cancel DuckDB queries
@@ -154,6 +209,12 @@ func RunSubprocessJob(config *SubprocessJobConfig) (*SubprocessJobResult, error)
 		FilesCompacted: job.FilesCompacted,
 		BytesBefore:    job.BytesBefore,
 		BytesAfter:     job.BytesAfter,
+		// The storage key of the output (empty when the job produced none).
+		// The parent's compacted-output observer keys the edge sync ledger
+		// on this; the temp path would never match a storage listing.
+		OutputFile:      job.OutputStorageKey,
+		CompactedInputs: job.CompactedInputKeys(),
+		ManifestPath:    job.RetainedManifestPath(),
 	}
 	if err != nil {
 		result.Error = err.Error()
@@ -371,15 +432,27 @@ func createStorageBackendFromConfig(config *SubprocessJobConfig, logger zerolog.
 	}
 }
 
+// sqlErrorMarkers are deterministic DuckDB SQL failure classes: a query that
+// fails to bind, resolve, or parse fails identically at any batch size, so the
+// adaptive splitter must not walk its retry ladder on them.
+var sqlErrorMarkers = []string{"binder error", "catalog error", "parser error"}
+
+// memoryErrorMarkers indicate memory pressure; retrying with a smaller batch
+// is exactly the right response.
+var memoryErrorMarkers = []string{"out of memory", "cannot allocate", "memory allocation failed"}
+
 // ClassifySubprocessError determines if a subprocess error is recoverable via retry.
 // Returns (recoverable, reason) where reason describes the error type.
 //
 // Recoverable errors (should retry with smaller batch):
 //   - Segmentation faults (memory corruption, often from memory pressure)
 //   - SIGKILL (exit code 137, usually OOM killer)
-//   - Explicit memory errors in stderr
+//   - Explicit memory errors in the error string or stderr (including DuckDB's
+//     own "Out of Memory Error", which arrives via the subprocess JSON result)
 //
 // Non-recoverable errors (should not retry):
+//   - Deterministic DuckDB SQL errors (Binder/Catalog/Parser Error) — these
+//     fail identically at any batch size
 //   - Permission denied
 //   - File not found
 //   - Access denied
@@ -389,8 +462,15 @@ func ClassifySubprocessError(err error, stderr string) (recoverable bool, reason
 	}
 
 	errStr := err.Error()
+	errLower := strings.ToLower(errStr)
 	stderrLower := strings.ToLower(stderr)
 
+	// Process-level evidence first: a real, actionable SQL error always arrives
+	// via the subprocess JSON result (exit 0, success=false), so it can never
+	// co-occur with a signal or OOM exit code. A crashed subprocess, however,
+	// embeds its whole stderr in the error string — including warn lines that
+	// may quote SQL error text — so a signal/exit-code match must win over the
+	// string markers below or a crash-after-warn would misclassify as permanent.
 	// Check for signals (segfault, killed)
 	if strings.Contains(errStr, "signal:") {
 		if strings.Contains(errStr, "segmentation fault") {
@@ -413,11 +493,21 @@ func ClassifySubprocessError(err error, stderr string) (recoverable bool, reason
 		}
 	}
 
-	// Check stderr for memory-related errors
-	if strings.Contains(stderrLower, "out of memory") ||
-		strings.Contains(stderrLower, "cannot allocate") ||
-		strings.Contains(stderrLower, "memory allocation failed") {
-		return true, "memory_error"
+	// Deterministic DuckDB SQL errors — permanent at any batch size, so the
+	// splitter's retry ladder (each rung re-downloads the whole batch) is pure
+	// waste. These arrive via the JSON result path, so they appear in err
+	// rather than stderr; check both.
+	for _, marker := range sqlErrorMarkers {
+		if strings.Contains(errLower, marker) || strings.Contains(stderrLower, marker) {
+			return false, "sql_error"
+		}
+	}
+
+	// Check for memory-related errors in either stream.
+	for _, marker := range memoryErrorMarkers {
+		if strings.Contains(errLower, marker) || strings.Contains(stderrLower, marker) {
+			return true, "memory_error"
+		}
 	}
 
 	// Non-recoverable errors - don't waste time retrying

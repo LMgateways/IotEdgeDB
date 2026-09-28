@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	sqlutil "iedb/internal/sql"
+
 	"github.com/apache/arrow-go/v18/arrow/array"
 	duckdb "github.com/duckdb/duckdb-go/v2"
 )
@@ -100,7 +102,7 @@ func (d *DuckDB) ArrowQueryContext(ctx context.Context, query string) (array.Rec
 	}
 
 	d.logger.Debug().
-		Str("query", query).
+		Str("query", sqlutil.ForLog(query)).
 		Msg("Arrow query executed")
 
 	return reader, conn, nil

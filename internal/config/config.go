@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -46,9 +48,13 @@ type ServerConfig struct {
 	Port            int
 	ReadTimeout     int
 	WriteTimeout    int
-	IdleTimeout     int   // Connection idle timeout in seconds
-	ShutdownTimeout int   // Graceful shutdown timeout in seconds
-	MaxPayloadSize  int64 // Maximum request payload size in bytes (applies to both compressed and decompressed)
+	IdleTimeout     int // Connection idle timeout in seconds
+	ShutdownTimeout int // Graceful shutdown timeout in seconds
+	// StorageCredentialsFailReady: /ready returns 503 while any storage tier's
+	// credential state is "expired". Default false — recycling on
+	// credential expiry is an operator policy; recommended for reader pools.
+	StorageCredentialsFailReady bool
+	MaxPayloadSize              int64 // Maximum request payload size in bytes (applies to both compressed and decompressed)
 	// TLS Configuration
 	TLSEnabled  bool   // Enable HTTPS/TLS
 	TLSCertFile string // Path to TLS certificate file (PEM format)
@@ -66,6 +72,14 @@ type DatabaseConfig struct {
 	// swept at startup. Empty leaves DuckDB's default behavior (CWD-relative).
 	TempDirectory string
 	TimeZone      string // DuckDB timezone (e.g., "Asia/Shanghai", "UTC")
+	// PreserveInsertionOrder controls DuckDB's preserve_insertion_order
+	// setting. false (the default) lets DuckDB reorder results of queries
+	// without an ORDER BY, which can reduce memory usage and unlock
+	// parallelism on large un-ordered materializations. Queries with an
+	// explicit ORDER BY are unaffected either way. Set true to restore
+	// pre-26.09.1 behavior where un-ordered SELECTs return rows in
+	// file/insertion order.
+	PreserveInsertionOrder bool
 }
 
 type StorageConfig struct {
@@ -94,7 +108,8 @@ type IngestConfig struct {
 	MaxBufferSize         int      // Max records before flush
 	MaxBufferAgeMS        int      // Max age in milliseconds before flush
 	Compression           string   // Parquet compression: snappy, gzip, zstd
-	UseDictionary         bool     // Use dictionary encoding
+	UseDictionary         bool     // Dictionary-encode string/binary columns at ingest (default false: compaction re-encodes anyway; see setDefaults)
+	NumericDictionary     bool     // With UseDictionary, also dictionary-encode numeric/timestamp columns (pre-26.09.1 behavior; costs hashing+boxing per value)
 	WriteStatistics       bool     // Write Parquet statistics
 	DataPageVersion       string   // Parquet data page version: 1.0 or 2.0
 	FlushWorkers          int      // Number of workers for async flush (default: 2x CPU, min 8, max 64)
@@ -142,6 +157,25 @@ type CompactionConfig struct {
 	DailySkipFileAgeCheckDays int    // Skip file creation time check for partitions older than N days (default: 7)
 	MaxConcurrent             int    // Max concurrent compaction jobs (default: 2)
 	TempDirectory             string // Temporary directory for compaction files (default: ./data/compaction)
+	// MemoryLimit is the DuckDB memory limit applied to EACH compaction
+	// subprocess. Empty (the default) means auto-derive: database.memory_limit
+	// divided by max_concurrent, so worst-case compaction memory stays at
+	// roughly one database.memory_limit regardless of concurrency. Before this
+	// key existed, each subprocess inherited the FULL database.memory_limit —
+	// with the default max_concurrent of 2, compaction alone could reach 2x
+	// the configured limit on top of the main process's DuckDB, which is
+	// exactly the RSS spike operators saw during backfill catch-up cycles.
+	// Accepts absolute sizes ("8GB", "512MB"). Percent forms are rejected:
+	// DuckDB's SET memory_limit does not support them, and the subprocess
+	// only warns on a failed SET, which would leave it silently unbounded.
+	MemoryLimit string
+
+	// Threads is the DuckDB thread count for EACH compaction subprocess.
+	// 0 (the default) means auto: half the CPU cores, minimum 1. Before this
+	// key existed, each subprocess used DuckDB's default of ALL cores, so two
+	// concurrent jobs could saturate the machine and starve ingest. Sort and
+	// scan buffers scale with threads, so this also bounds memory.
+	Threads int
 	// MaxFilesPerBatch bounds how many files a single compaction job feeds to
 	// one DuckDB read_parquet() call; larger partitions are split into that
 	// many batches, each producing its own output file. DuckDB can segfault
@@ -221,12 +255,23 @@ type QueryConfig struct {
 	EnableS3Cache        bool  // Enable S3 file caching for faster repeated reads (useful for CTEs/subqueries)
 	S3CacheSize          int64 // Cache size in bytes (parsed from "128MB", "256MB", etc.)
 	S3CacheTTLSeconds    int   // Cache entry TTL in seconds (default: 3600 = 1 hour)
+	// FileTimePruning (EXPERIMENTAL, 26.09.2) expands the current-hour
+	// partition glob and drops files whose filename flush-timestamp proves
+	// they cannot contain rows in the query's time range. Big win for
+	// high-frequency ingest where the live hour holds thousands of small
+	// files (local backend only). Opt-in while experimental; planned to
+	// become the default in 27.01.1.
+	FileTimePruning bool
+	// FileTimePruningMarginSeconds widens the keep-window below the query's
+	// lower bound to absorb writer clock skew (default 300).
+	FileTimePruningMarginSeconds int
 }
 
 // LicenseConfig holds configuration for enterprise license validation
 type LicenseConfig struct {
-	Enabled bool   // Enable license validation (default: false)
-	Key     string // License key (IEDB-ENT-XXXX-XXXX-XXXX-XXXX)
+	Enabled  bool   // Enable license validation (default: false)
+	Key      string // License key (IEDB-ENT-XXXX-XXXX-XXXX-XXXX)
+	FilePath string
 }
 
 // SchedulerConfig holds configuration for automatic schedulers (Enterprise features)
@@ -512,24 +557,26 @@ func Load() (*Config, error) {
 	// Build config from Viper (which includes defaults + env vars)
 	cfg := &Config{
 		Server: ServerConfig{
-			Host:            v.GetString("server.host"),
-			Port:            v.GetInt("server.port"),
-			ReadTimeout:     v.GetInt("server.read_timeout"),
-			WriteTimeout:    v.GetInt("server.write_timeout"),
-			IdleTimeout:     v.GetInt("server.idle_timeout"),
-			ShutdownTimeout: v.GetInt("server.shutdown_timeout"),
-			MaxPayloadSize:  maxPayloadSize,
-			TLSEnabled:      v.GetBool("server.tls_enabled"),
-			TLSCertFile:     v.GetString("server.tls_cert_file"),
-			TLSKeyFile:      v.GetString("server.tls_key_file"),
+			Host:                        v.GetString("server.host"),
+			Port:                        v.GetInt("server.port"),
+			ReadTimeout:                 v.GetInt("server.read_timeout"),
+			WriteTimeout:                v.GetInt("server.write_timeout"),
+			IdleTimeout:                 v.GetInt("server.idle_timeout"),
+			ShutdownTimeout:             v.GetInt("server.shutdown_timeout"),
+			StorageCredentialsFailReady: v.GetBool("server.storage_credentials_fail_ready"),
+			MaxPayloadSize:              maxPayloadSize,
+			TLSEnabled:                  v.GetBool("server.tls_enabled"),
+			TLSCertFile:                 v.GetString("server.tls_cert_file"),
+			TLSKeyFile:                  v.GetString("server.tls_key_file"),
 		},
 		Database: DatabaseConfig{
-			MaxConnections: v.GetInt("database.max_connections"),
-			MemoryLimit:    v.GetString("database.memory_limit"),
-			ThreadCount:    v.GetInt("database.thread_count"),
-			EnableWAL:      v.GetBool("database.enable_wal"),
-			TempDirectory:  v.GetString("database.temp_directory"),
-			TimeZone:       v.GetString("database.timezone"),
+			MaxConnections:         v.GetInt("database.max_connections"),
+			MemoryLimit:            v.GetString("database.memory_limit"),
+			ThreadCount:            v.GetInt("database.thread_count"),
+			EnableWAL:              v.GetBool("database.enable_wal"),
+			TempDirectory:          v.GetString("database.temp_directory"),
+			TimeZone:               v.GetString("database.timezone"),
+			PreserveInsertionOrder: v.GetBool("database.preserve_insertion_order"),
 		},
 		Storage: StorageConfig{
 			// Normalize once at load so the backend switch, the DuckDB
@@ -560,6 +607,7 @@ func Load() (*Config, error) {
 			MaxBufferAgeMS:        v.GetInt("ingest.max_buffer_age_ms"),
 			Compression:           v.GetString("ingest.compression"),
 			UseDictionary:         v.GetBool("ingest.use_dictionary"),
+			NumericDictionary:     v.GetBool("ingest.numeric_dictionary"),
 			WriteStatistics:       v.GetBool("ingest.write_statistics"),
 			DataPageVersion:       v.GetString("ingest.data_page_version"),
 			FlushWorkers:          v.GetInt("ingest.flush_workers"),
@@ -604,6 +652,8 @@ func Load() (*Config, error) {
 			MaxConcurrent:               v.GetInt("compaction.max_concurrent"),
 			MaxFilesPerBatch:            v.GetInt("compaction.max_files_per_batch"),
 			TempDirectory:               v.GetString("compaction.temp_directory"),
+			MemoryLimit:                 v.GetString("compaction.memory_limit"),
+			Threads:                     v.GetInt("compaction.threads"),
 			CompletionWatcherIntervalMS: v.GetInt("compaction.completion_watcher_interval_ms"),
 			CompletionDir:               v.GetString("compaction.completion_dir"),
 			CompletionOrphanTimeoutMS:   v.GetInt("compaction.completion_orphan_timeout_ms"),
@@ -648,15 +698,18 @@ func Load() (*Config, error) {
 			Enabled: v.GetBool("mqtt.enabled"),
 		},
 		Query: QueryConfig{
-			Timeout:              v.GetInt("query.timeout"),
-			SlowQueryThresholdMs: v.GetInt("query.slow_query_threshold_ms"),
-			EnableS3Cache:        v.GetBool("query.enable_s3_cache"),
-			S3CacheSize:          s3CacheSize,
-			S3CacheTTLSeconds:    v.GetInt("query.s3_cache_ttl_seconds"),
+			Timeout:                      v.GetInt("query.timeout"),
+			SlowQueryThresholdMs:         v.GetInt("query.slow_query_threshold_ms"),
+			FileTimePruning:              v.GetBool("query.file_time_pruning"),
+			FileTimePruningMarginSeconds: v.GetInt("query.file_time_pruning_margin_seconds"),
+			EnableS3Cache:                v.GetBool("query.enable_s3_cache"),
+			S3CacheSize:                  s3CacheSize,
+			S3CacheTTLSeconds:            v.GetInt("query.s3_cache_ttl_seconds"),
 		},
 		License: LicenseConfig{
-			Enabled: v.GetBool("license.enabled"),
-			Key:     v.GetString("license.key"),
+			Enabled:  v.GetBool("license.enabled"),
+			Key:      v.GetString("license.key"),
+			FilePath: strings.TrimSpace(v.GetString("license.file_path")),
 		},
 		Scheduler: SchedulerConfig{
 			RetentionSchedule: v.GetString("scheduler.retention_schedule"),
@@ -794,6 +847,29 @@ func Load() (*Config, error) {
 	if cfg.Database.MemoryLimit != "" && !memoryLimitRe.MatchString(cfg.Database.MemoryLimit) {
 		return nil, fmt.Errorf("invalid database.memory_limit value: %q", cfg.Database.MemoryLimit)
 	}
+	if err := validateCompactionMemoryLimit(cfg.Compaction.MemoryLimit); err != nil {
+		return nil, err
+	}
+	if cfg.Compaction.Threads < 0 {
+		return nil, fmt.Errorf("invalid compaction.threads value: %d (must be >= 0; 0 = auto)", cfg.Compaction.Threads)
+	}
+	// A negative max_concurrent would reach make(chan struct{}, m.MaxConcurrent)
+	// in the compaction manager's cycle loop and panic the process at the first
+	// scheduled cycle — NewManager only defaults the ZERO value. Fail fast here
+	// instead; 0 remains "use the default of 2".
+	if cfg.Compaction.MaxConcurrent < 0 {
+		return nil, fmt.Errorf("invalid compaction.max_concurrent value: %d (must be >= 0; 0 = default)", cfg.Compaction.MaxConcurrent)
+	}
+
+	// Resolve the "auto" sentinels AFTER validation so everything downstream
+	// (main.go wiring, the compaction manager, the subprocess) sees concrete
+	// effective values and the startup config log shows what will actually run.
+	if cfg.Compaction.MemoryLimit == "" {
+		cfg.Compaction.MemoryLimit = deriveCompactionMemoryLimit(cfg.Database.MemoryLimit, cfg.Compaction.MaxConcurrent)
+	}
+	if cfg.Compaction.Threads == 0 {
+		cfg.Compaction.Threads = getDefaultCompactionThreads()
+	}
 	// Trim storage identifiers in-place before validating. These build DuckDB
 	// secret SCOPEs and sandbox allowlist URIs (s3://bucket/prefix/,
 	// azure://container/) and feed cloud-client config; stray copy-paste
@@ -893,6 +969,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.host", "0.0.0.0")
 	v.SetDefault("server.port", 8000)
 	v.SetDefault("server.read_timeout", 30)
+	v.SetDefault("server.storage_credentials_fail_ready", false)
 	v.SetDefault("server.write_timeout", 30)
 	v.SetDefault("server.idle_timeout", 120)
 	v.SetDefault("server.shutdown_timeout", 30)
@@ -908,7 +985,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.memory_limit", getDefaultMemoryLimit())
 	v.SetDefault("database.thread_count", getDefaultThreadCount())
 	v.SetDefault("database.enable_wal", true)
-	v.SetDefault("database.temp_directory", "./.tmp") // DuckDB query spill files (overflow, sort, join). Orphans swept at startup.
+	v.SetDefault("database.temp_directory", "./.tmp")        // DuckDB query spill files (overflow, sort, join). Orphans swept at startup.
+	v.SetDefault("database.preserve_insertion_order", false) // false = SQL-standard unordered results; ORDER BY queries unaffected
 
 	// Storage defaults
 	v.SetDefault("storage.backend", "local")
@@ -927,6 +1005,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ingest.max_buffer_age_ms", 5000)
 	v.SetDefault("ingest.compression", "snappy")
 	v.SetDefault("ingest.use_dictionary", true)
+	v.SetDefault("ingest.use_dictionary", false)
+	v.SetDefault("ingest.numeric_dictionary", false) // only relevant with use_dictionary=true; see IngestConfig
 	v.SetDefault("ingest.write_statistics", true)
 	v.SetDefault("ingest.data_page_version", "2.0")
 	v.SetDefault("ingest.flush_workers", getDefaultFlushWorkers())
@@ -964,6 +1044,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("compaction.max_concurrent", 2)                   // 2 concurrent jobs
 	v.SetDefault("compaction.max_files_per_batch", 30)             // 30 files per DuckDB read_parquet() call; valid range [2, 500]
 	v.SetDefault("compaction.temp_directory", "./data/compaction") // Temp directory for compaction files
+	v.SetDefault("compaction.memory_limit", "")                    // "" = auto: database.memory_limit / max_concurrent (see CompactionConfig.MemoryLimit)
+	v.SetDefault("compaction.threads", 0)                          // 0 = auto: half the CPU cores, min 1 (see CompactionConfig.Threads)
 	// Phase 4: completion-manifest watcher tunables
 	v.SetDefault("compaction.completion_watcher_interval_ms", 1000) // 1s poll rate
 	v.SetDefault("compaction.completion_dir", "")                   // "" = derive from temp_directory
@@ -1005,16 +1087,19 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("mqtt.enabled", false) // Feature toggle only - disabled by default
 
 	// Query defaults
-	v.SetDefault("query.timeout", 300)               // 5 minute query timeout (0 = no timeout)
-	v.SetDefault("query.slow_query_threshold_ms", 0) // Disabled by default (0 = no slow query logging)
-	v.SetDefault("query.enable_s3_cache", false)     // Disabled by default (opt-in feature)
-	v.SetDefault("query.s3_cache_size", "128MB")     // 128MB cache (256 blocks × 512KB)
-	v.SetDefault("query.s3_cache_ttl_seconds", 3600) // 1 hour
+	v.SetDefault("query.timeout", 300)                          // 5 minute query timeout (0 = no timeout)
+	v.SetDefault("query.slow_query_threshold_ms", 0)            // Disabled by default (0 = no slow query logging)
+	v.SetDefault("query.file_time_pruning", false)              // EXPERIMENTAL (26.09.2), opt-in; planned default-on in 27.01.1
+	v.SetDefault("query.file_time_pruning_margin_seconds", 300) // Writer clock-skew allowance
+	v.SetDefault("query.enable_s3_cache", false)                // Disabled by default (opt-in feature)
+	v.SetDefault("query.s3_cache_size", "128MB")                // 128MB cache (256 blocks × 512KB)
+	v.SetDefault("query.s3_cache_ttl_seconds", 3600)            // 1 hour
 
 	// License defaults (Enterprise features)
 	// Note: Server URL and validation interval are hardcoded in internal/license/client.go
 	v.SetDefault("license.enabled", false) // Disabled by default
 	v.SetDefault("license.key", "")        // Must be provided
+	v.SetDefault("license.file_path", "")  // Offline license file (air-gapped); wins over license.key
 
 	// Scheduler defaults (Enterprise features)
 	// Note: CQ and retention schedulers are auto-enabled when their features are enabled AND license allows
@@ -1209,6 +1294,98 @@ func getDefaultMaxConnections() int {
 	return maxConns
 }
 
+// memoryLimitValueRe splits a validated memory-limit string into its numeric
+// value and unit. Same shape as memoryLimitRe, with capture groups.
+var memoryLimitValueRe = regexp.MustCompile(`^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|%)?$`)
+
+// validateCompactionMemoryLimit rejects compaction.memory_limit values that
+// DuckDB's SET memory_limit would refuse: percent forms and unit-less numbers
+// (both of which memoryLimitRe allows, because database.memory_limit shares
+// that regex). The distinction matters here and not for database.memory_limit
+// because the main database's failed SET aborts startup loudly, while the
+// compaction subprocess only WARNS on a failed SET — an un-SETtable value
+// would silently leave every subprocess unbounded, defeating the limit
+// entirely. Empty is valid ("auto"). Verified against DuckDB: absolute sizes
+// with a B/KB/MB/GB/TB unit work (decimals and internal whitespace included);
+// "%" and bare numbers are parser errors.
+func validateCompactionMemoryLimit(limit string) error {
+	if limit == "" {
+		return nil
+	}
+	if !memoryLimitRe.MatchString(limit) {
+		return fmt.Errorf("invalid compaction.memory_limit value: %q", limit)
+	}
+	m := memoryLimitValueRe.FindStringSubmatch(strings.TrimSpace(limit))
+	if m == nil || m[2] == "" || m[2] == "%" {
+		return fmt.Errorf("invalid compaction.memory_limit value: %q (DuckDB requires an absolute size with a unit, e.g. \"2GB\" or \"512MB\"; percent and unit-less forms are not supported)", limit)
+	}
+	return nil
+}
+
+// deriveCompactionMemoryLimit computes the auto value for
+// compaction.memory_limit: database.memory_limit divided by the effective
+// max_concurrent, so all concurrent compaction subprocesses together stay
+// within roughly one database.memory_limit. The unit is preserved; the value
+// is floored to 2 decimals so the division never rounds the total up. Falls
+// back to dbLimit unchanged when it cannot parse (dbLimit is already
+// regex-validated, so this is defensive) or when division would produce a
+// nonsensical near-zero limit.
+//
+// An empty dbLimit (operator explicitly disabled the database limit, letting
+// DuckDB default to 80% of RAM) returns "" — there is nothing to derive from,
+// and the subprocess skips the SET entirely, matching pre-existing behavior.
+// A percent or unit-less dbLimit also returns "": DuckDB's SET memory_limit
+// rejects both forms, so such a config aborts startup at the main database's
+// loud SET before compaction ever runs — deriving from it would only smuggle
+// an un-SETtable value past validateCompactionMemoryLimit (which checks the
+// operator-set value BEFORE this derivation fills it in).
+//
+// The remaining fallbacks (unparseable input, near-zero result) return
+// dbLimit verbatim — i.e. the pre-derivation behavior of one full database
+// limit per subprocess. Both are unreachable through Load, which has already
+// regex-validated dbLimit; they exist only so a future caller can't get an
+// empty limit out of a non-empty input by accident.
+func deriveCompactionMemoryLimit(dbLimit string, maxConcurrent int) string {
+	if dbLimit == "" {
+		return ""
+	}
+	m := memoryLimitValueRe.FindStringSubmatch(strings.TrimSpace(dbLimit))
+	if m == nil {
+		return dbLimit
+	}
+	if m[2] == "" || m[2] == "%" {
+		return ""
+	}
+	// Load has already rejected negative max_concurrent; 0 means the default
+	// of 2, matching compaction.NewManager.
+	if maxConcurrent <= 0 {
+		maxConcurrent = 2
+	}
+	if maxConcurrent == 1 {
+		return dbLimit
+	}
+	value, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return dbLimit
+	}
+	derived := math.Floor(value/float64(maxConcurrent)*100) / 100
+	if derived <= 0 {
+		return dbLimit
+	}
+	return strconv.FormatFloat(derived, 'f', -1, 64) + m[2]
+}
+
+// getDefaultCompactionThreads is the auto value for compaction.threads: half
+// the CPU cores, minimum 1. With the default max_concurrent of 2, the two
+// subprocesses together use about as many threads as the machine has cores,
+// leaving headroom for the main process's ingest and query work.
+func getDefaultCompactionThreads() int {
+	threads := runtime.NumCPU() / 2
+	if threads < 1 {
+		threads = 1
+	}
+	return threads
+}
 func getDefaultMemoryLimit() string {
 	// Target ~25% of system memory for DuckDB, capped at reasonable limits
 	// This is a conservative default that works well across different systems

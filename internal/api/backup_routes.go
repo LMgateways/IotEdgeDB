@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"regexp"
+	"sync/atomic"
 	"time"
 
 	"iedb/internal/auth"
@@ -17,9 +19,10 @@ var validBackupID = regexp.MustCompile(`^backup-\d{8}-\d{6}-[a-f0-9]{8}$`)
 
 // BackupHandler handles backup and restore API operations.
 type BackupHandler struct {
-	manager     *backup.Manager
-	authManager *auth.AuthManager
-	logger      zerolog.Logger
+	manager         *backup.Manager
+	authManager     *auth.AuthManager
+	logger          zerolog.Logger
+	activeOperation atomic.Pointer[string]
 }
 
 // NewBackupHandler creates a new backup handler.
@@ -80,9 +83,14 @@ func (h *BackupHandler) CreateBackup(c *fiber.Ctx) error {
 		opts.IncludeConfig = *req.IncludeConfig
 	}
 
+	acquired, err := h.acquireOperation(c, "backup")
+	if !acquired {
+		return err
+	}
 	// Run backup asynchronously — Fiber recycles c.Context() after the handler
 	// returns, so we must use a detached context.
 	go func() {
+		defer h.activeOperation.Store(nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer cancel()
 		if _, err := h.manager.CreateBackup(ctx, opts); err != nil {
@@ -166,10 +174,28 @@ func (h *BackupHandler) DeleteBackup(c *fiber.Ctx) error {
 		})
 	}
 
+	// Deletion shares the backup/restore admission slot : deleting the
+	// backup a restore is reading tears files out from under it, and deleting
+	// one mid-write leaves a half-written directory. Unlike backup/restore the
+	// delete is synchronous, so the handler holds the slot for its duration.
+	acquired, err := h.acquireOperation(c, "delete")
+	if !acquired {
+		return err
+	}
+	defer h.activeOperation.Store(nil)
 	ctx, cancel := context.WithTimeout(c.Context(), 30*time.Second)
 	defer cancel()
 
 	if err := h.manager.DeleteBackup(ctx, id); err != nil {
+		// Belt for operations started outside this handler: the manager
+		// refuses to delete while its own mutex is held.
+		if errors.Is(err, backup.ErrOperationInProgress) {
+			operation := "unknown"
+			if p := h.manager.GetProgress(); p != nil && p.Status == "running" {
+				operation = p.Operation
+			}
+			return h.operationConflict(c, operation)
+		}
 		h.logger.Error().Err(err).Str("backup_id", id).Msg("Failed to delete backup")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to delete backup",
@@ -238,8 +264,13 @@ func (h *BackupHandler) RestoreBackup(c *fiber.Ctx) error {
 		opts.RestoreConfig = *req.RestoreConfig
 	}
 
+	acquired, err := h.acquireOperation(c, "restore")
+	if !acquired {
+		return err
+	}
 	// Run restore asynchronously — detached context (Fiber recycles c.Context()).
 	go func() {
+		defer h.activeOperation.Store(nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer cancel()
 		if _, err := h.manager.RestoreBackup(ctx, opts); err != nil {
@@ -251,5 +282,30 @@ func (h *BackupHandler) RestoreBackup(c *fiber.Ctx) error {
 		"message":   "Restore started",
 		"backup_id": req.BackupID,
 		"status":    "running",
+	})
+}
+
+// acquireOperation atomically reserves the handler's shared backup/restore slot.
+func (h *BackupHandler) acquireOperation(c *fiber.Ctx, operation string) (bool, error) {
+	if p := h.manager.GetProgress(); p != nil && p.Status == "running" {
+		return false, h.operationConflict(c, p.Operation)
+	}
+	if !h.activeOperation.CompareAndSwap(nil, &operation) {
+		// The holder may release between the failed CAS and this Load; report
+		// "unknown" rather than an empty operation in that sliver.
+		held := "unknown"
+		if active := h.activeOperation.Load(); active != nil {
+			held = *active
+		}
+		return false, h.operationConflict(c, held)
+	}
+	return true, nil
+}
+
+func (h *BackupHandler) operationConflict(c *fiber.Ctx, operation string) error {
+	return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+		"error":     "A backup or restore operation is already in progress",
+		"status":    "running",
+		"operation": operation,
 	})
 }

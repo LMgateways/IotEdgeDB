@@ -40,6 +40,15 @@ type RecoveryOptions struct {
 
 	// ColumnarCallback handles columnar WAL entries from the zero-copy write path
 	ColumnarCallback ColumnarRecoveryCallback
+	// MinFileAge, when > 0, skips WAL files modified more recently than this.
+	// Defense against the rotation-race class beyond the SkipActiveFile name match:
+	// the periodic recovery reads CurrentFile() and then scans — a rotation
+	// landing between those instants would put the NEW active (header-only)
+	// file in the scan, and deleting it re-creates the unlinked-inode data
+	// loss. Production call sites pass a few seconds; a genuinely
+	// recoverable young file is picked up by the next pass. Zero disables
+	// the guard (tests recover freshly-written files).
+	MinFileAge time.Duration
 }
 
 // Recovery manages WAL recovery operations
@@ -104,6 +113,14 @@ func (r *Recovery) RecoverWithOptions(ctx context.Context, callback RecoveryCall
 			continue
 		}
 
+		// See RecoveryOptions.MinFileAge (rotation-race defense).
+		if opts.MinFileAge > 0 {
+			if info, statErr := os.Stat(walFile); statErr == nil && time.Since(info.ModTime()) < opts.MinFileAge {
+				r.logger.Debug().Str("file", filepath.Base(walFile)).Msg("Skipping too-recent WAL file (possible fresh rotation)")
+				stats.SkippedFiles++
+				continue
+			}
+		}
 		r.logger.Info().Str("file", filepath.Base(walFile)).Msg("Recovering WAL file")
 
 		reader := NewReader(walFile, r.logger)
@@ -123,9 +140,22 @@ func (r *Recovery) RecoverWithOptions(ctx context.Context, callback RecoveryCall
 			if entry.ColumnarData != nil && opts.ColumnarCallback != nil {
 				// Columnar entry from zero-copy AppendRaw path
 				if err := opts.ColumnarCallback(ctx, entry.ColumnarData.Database, entry.ColumnarData.Measurement, entry.ColumnarData.Columns); err != nil {
-					r.logger.Error().Err(err).Msg("Failed to replay columnar WAL entry")
+					// Continue with the remaining entries instead of
+					// abandoning the rest of the file — one poisoned entry
+					// (e.g. a payload the write path rejects) must not
+					// discard every durable entry after it. The file is not
+					// deleted by THIS recovery pass (allEntriesSucceeded=
+					// false); note the periodic WAL maintenance will still
+					// purge it once it passes safeAge, so the failed entry
+					// is not durably retried — the win here is only that
+					// the healthy entries after it get replayed now.
+					r.logger.Error().Err(err).
+						Str("database", entry.ColumnarData.Database).
+						Str("measurement", entry.ColumnarData.Measurement).
+						Msg("Failed to replay columnar WAL entry; continuing with remaining entries")
 					allEntriesSucceeded = false
-					break
+					stats.CorruptedEntries++
+					continue
 				}
 				fileRecoveredBatches++
 				// Count rows from first column length

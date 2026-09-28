@@ -207,11 +207,44 @@ func (m *Manager) copyDataFiles(ctx context.Context, backupID string, files []st
 	return nil
 }
 
-// backupSQLite copies the SQLite database file into the backup.
-// It performs a WAL checkpoint first to ensure a consistent copy.
+// partSuffix mirrors the staging suffix LocalBackend.WriteReader uses for
+// in-progress writes. Kept in sync with internal/storage/local.go#partPath.
+const partSuffix = ".part"
+
+// cleanupPartialWrite removes the staging file a failed WriteReader leaves behind.
+//
+// LocalBackend.WriteReader deliberately preserves "<path>.part" on failure so the
+// file-replication puller can resume from the last committed byte. Backup has no
+// resume path — a retried backup starts over under a fresh backup ID — so that
+// staging file is unreferenced garbage: never read, never listed as a backup
+// (it has no manifest.json), and holding disk equal to the bytes transferred
+// before the failure.
+//
+// Best-effort by design: the write already failed, so the cleanup very likely
+// fails too (unwritable volume, storage unreachable). A cleanup failure must not
+// mask the real error, so it is logged at debug and discarded.
+func (m *Manager) cleanupPartialWrite(ctx context.Context, destPath string) {
+	stagingPath := destPath + partSuffix
+	if err := m.backupStorage.Delete(ctx, stagingPath); err != nil {
+		m.logger.Debug().
+			Str("path", stagingPath).
+			Err(err).
+			Msg("Could not remove partial backup staging file")
+	}
+}
+
+// backupSQLite copies the shared SQLite database into the backup.
 func (m *Manager) backupSQLite(ctx context.Context, backupID string) error {
+	return m.backupSQLiteFile(ctx, backupID, m.sqliteDBPath, "iedb.db")
+}
+
+// backupSQLiteFile copies one SQLite database file into the backup under
+// metadata/<destName>. It performs a WAL checkpoint first so the copy is
+// consistent, and streams via the storage backend rather than reading the whole
+// database into memory.
+func (m *Manager) backupSQLiteFile(ctx context.Context, backupID, dbPath, destName string) error {
 	// Checkpoint WAL to ensure all data is flushed to the main DB file.
-	db, err := sql.Open("sqlite3", m.sqliteDBPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open SQLite for checkpoint: %w", err)
 	}
@@ -221,21 +254,40 @@ func (m *Manager) backupSQLite(ctx context.Context, backupID string) error {
 	}
 	db.Close()
 
-	data, err := os.ReadFile(m.sqliteDBPath)
+	// Get file size for WriteReader
+	info, err := os.Stat(dbPath)
 	if err != nil {
-		return fmt.Errorf("failed to read SQLite database: %w", err)
+		return fmt.Errorf("failed to stat SQLite database: %w", err)
 	}
+	size := info.Size()
 
-	destPath := fmt.Sprintf("%s/metadata/iedb.db", backupID)
-	if err := m.backupStorage.Write(ctx, destPath, data); err != nil {
+	// Stream via temp file to avoid loading entire DB into memory
+	f, err := os.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open SQLite database: %w", err)
+	}
+	defer f.Close()
+
+	destPath := fmt.Sprintf("%s/metadata/%s", backupID, destName)
+	if err := m.backupStorage.WriteReader(ctx, destPath, f, size); err != nil {
 		return fmt.Errorf("failed to write SQLite backup: %w", err)
 	}
 
-	m.logger.Info().Str("backup_id", backupID).Int("bytes", len(data)).Msg("SQLite database backed up")
+	m.logger.Info().
+		Str("backup_id", backupID).
+		Str("database", destName).
+		Int64("bytes", size).
+		Msg("SQLite database backed up")
 	return nil
 }
 
 // backupConfig copies the iedb.toml config file into the backup.
+//
+// SECURITY: iedb.toml typically contains plaintext credentials (S3 secret key,
+// Azure account key, cluster shared secret). The backup storage must be treated
+// as secret material with the same access controls as the live config.
+// Operators who cannot secure backup storage should set backup.include_config
+// to false in iedb.toml.
 func (m *Manager) backupConfig(ctx context.Context, backupID string) error {
 	data, err := os.ReadFile(m.configPath)
 	if err != nil {

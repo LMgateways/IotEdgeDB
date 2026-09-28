@@ -3,7 +3,7 @@
 // malloc_trim). All three call sites previously duplicated the same eight lines
 // of throttle bookkeeping; this centralizes them.
 //
-// The pattern, and every subtlety it encodes, comes from the #420 review:
+// The pattern, and every subtlety it encodes:
 //
 //   - The window is anchored to the MONOTONIC clock (Go's time.Since over a
 //     process-start instant), so an NTP step or a manual `date` change cannot
@@ -15,8 +15,8 @@
 //     is load-bearing, not cosmetic: because time.Since(processStart) is a SMALL
 //     duration early in the process's life (a few seconds), `now - 0` is less
 //     than any practical interval, so without the sentinel the very FIRST call
-//     would be throttled instead of firing. That exact bug shipped once during
-//     #420 and cost ~25 MB of idle RSS before it was caught by the memory repro.
+//     would be throttled instead of firing. That exact bug shipped once and
+//     cost ~25 MB of idle RSS before it was caught by the memory repro.
 //     The wall-clock version accidentally avoided it (now - 0 was ~1.78e18, huge);
 //     the monotonic version must handle it explicitly.
 package throttle
@@ -65,6 +65,14 @@ func New(interval time.Duration) *Debouncer {
 // false — exactly one caller wins per interval.
 func (d *Debouncer) TryAcquire() bool {
 	now := time.Since(d.processStart).Nanoseconds()
+	// The monotonic clock's resolution is coarser than a function call: a
+	// TryAcquire in the same tick as construction sees now==0, and storing 0
+	// would record the firing AS the "never fired" sentinel — re-arming the
+	// throttle immediately. Nudge to 1ns; the window is off by a nanosecond,
+	// the sentinel stays unambiguous.
+	if now == 0 {
+		now = 1
+	}
 	last := d.lastNanos.Load()
 	// last==0 means "never fired" — the first call always proceeds. See the
 	// package comment for why this sentinel is required with monotonic time.

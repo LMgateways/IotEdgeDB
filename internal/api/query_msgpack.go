@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	sqlutil "iedb/internal/sql"
+
 	"github.com/Basekick-Labs/msgpack/v6"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -129,7 +131,7 @@ func executeArrowMsgPackQuery(
 		if onFail != nil {
 			onFail(err.Error())
 		}
-		h.logger.Error().Err(err).Str("format", "msgpack").Str("sql", convertedSQL).Msg("Arrow MsgPack query failed")
+		h.logger.Error().Err(err).Str("format", "msgpack").Str("sql", sqlutil.ForLog(convertedSQL)).Msg("Arrow MsgPack query failed")
 		_ = respondError(c, fiber.StatusInternalServerError, err.Error(), timestamp, start)
 		return -1, true
 	}
@@ -141,12 +143,28 @@ func executeArrowMsgPackQuery(
 	// batch in memory anyway (array length prefix); doing the drain
 	// here lets us return a proper 5xx via respondError when DuckDB
 	// errors mid-materialization, instead of streaming a truncated
-	// body under a 200 status that's already been sent. Gemini r3
-	// flagged this; the JSON path has the same shape but its row-by-
-	// row stream can produce partial JSON-valid output, so the
-	// failure mode is less harmful there.
+	// body under a 200 status that's already been sent. The JSON path
+	// has the same shape, but its row-by-row stream can produce
+	// partial JSON-valid output, so the failure mode is less harmful
+	// there.
 	schema := reader.Schema()
-	batches, rowCount, drainErr := drainArrowBatches(ctx, reader, governanceMaxRows)
+	// Normalize decimal columns exactly as the Arrow IPC path does
+	// (see normalizeDecimalSchema): DuckDB returns SUM(integer) as
+	// decimal(38,0) and AVG as decimal(x,y). Without this the msgpack
+	// encoder has no *array.Decimal128 case, so decimal columns fall
+	// through to encodeFallbackColumn and go out as msgpack *strings*
+	// while the "types" array advertises decimal(38, 0) — the wire
+	// contract disagreeing with the bytes on the wire. Casting here
+	// keeps types and values consistent and makes msgpack agree with
+	// /api/v1/query/arrow for the same SQL.
+	// castInfo is nil when there are no decimal columns (zero overhead
+	// on the common path).
+	castInfo := normalizeDecimalSchema(schema)
+	if castInfo != nil {
+		schema = castInfo.schema
+	}
+
+	batches, rowCount, drainErr := drainArrowBatches(ctx, reader, governanceMaxRows, castInfo)
 	// reader and conn are no longer needed after the drain — release
 	// them before either the error or the streaming branch.
 	reader.Release()
@@ -179,7 +197,7 @@ func executeArrowMsgPackQuery(
 			onFail(drainErr.Error())
 		}
 		h.logger.Error().Err(drainErr).Str("format", "msgpack").
-			Str("sql", convertedSQL).Msg("Arrow MsgPack drain failed")
+			Str("sql", sqlutil.ForLog(convertedSQL)).Msg("Arrow MsgPack drain failed")
 		_ = respondError(c, fiber.StatusInternalServerError, drainErr.Error(), timestamp, start)
 		return -1, true
 	}
@@ -188,6 +206,15 @@ func executeArrowMsgPackQuery(
 	// in memory, encode is the only remaining work and can only fail
 	// via client disconnect (no DuckDB or context-deadline path).
 	c.Set(fiber.HeaderContentType, msgpackContentType)
+	// Accept-Encoding negotiation before headers commit at first body byte.
+	respEncoding := negotiateResponseCompression(c)
+	// Vary is sent whenever negotiation happens (shared caches must key on
+	// Accept-Encoding even for identity responses); c.Vary appends with
+	// dedup rather than clobbering values set by other middleware.
+	c.Vary(fiber.HeaderAcceptEncoding)
+	if respEncoding != "" {
+		c.Set(fiber.HeaderContentEncoding, respEncoding)
+	}
 	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
 		// Release retained batches when the stream finishes (or fails).
 		defer func() {
@@ -201,10 +228,15 @@ func executeArrowMsgPackQuery(
 		// time (~9 bytes per int64), so on a 1M-row response the
 		// default bufio fills and flushes ~15k times — each flush is a
 		// channel-send to fasthttp's chunked-transfer goroutine. The
-		// larger buffer cuts that to ~250 sends.
-		bw := bufio.NewWriterSize(w, 256*1024)
+		// larger buffer cuts that to ~250 sends. With compression
+		// negotiated, the pooled encoder sits between that buffer and w.
+		sink, finishCompression := compressedSink(w, respEncoding)
+		bw := bufio.NewWriterSize(sink, 256*1024)
 		rc, streamErr := streamMsgPackFromBatches(ctx, bw, schema, batches, rowCount, profile, start, timestamp)
 		bw.Flush()
+		if err := finishCompression(); err != nil && streamErr == nil {
+			streamErr = err
+		}
 		w.Flush()
 
 		if cancel != nil {
@@ -250,10 +282,24 @@ func executeArrowMsgPackQuery(
 
 // drainArrowBatches reads all batches from the Arrow reader into a
 // retained slice. governanceMaxRows (when > 0) trims the trailing batch
-// to fit. Returns the batches, total row count, and an error if ctx
-// fires or the reader surfaces a deferred error. Callers MUST Release()
-// the returned batches when done.
-func drainArrowBatches(ctx context.Context, reader array.RecordReader, governanceMaxRows int) ([]arrow.Record, int, error) {
+// to fit. castInfo (when non-nil) rewrites decimal columns to int64 /
+// float64 as each batch is retained, so the buffered batches match the
+// normalized schema the encoder advertises. Returns the batches, total
+// row count, and an error if ctx fires, the reader surfaces a deferred
+// error, or a decimal cast fails. Callers MUST Release() the returned
+// batches when done.
+func drainArrowBatches(ctx context.Context, reader array.RecordReader, governanceMaxRows int, castInfo *decimalCastInfo) ([]arrow.Record, int, error) {
+	// retain prepares one batch for buffering: cast decimals when
+	// castInfo is set (castDecimalBatch returns an already-owned record,
+	// so no extra Retain), otherwise take a reference on the reader's
+	// batch, which is only valid until the next Next() call.
+	retain := func(batch arrow.Record) (arrow.Record, error) {
+		if castInfo == nil {
+			batch.Retain()
+			return batch, nil
+		}
+		return castDecimalBatch(batch, castInfo)
+	}
 	rowCap := 0
 	if governanceMaxRows > 0 {
 		rowCap = governanceMaxRows
@@ -280,19 +326,60 @@ func drainArrowBatches(ctx context.Context, reader array.RecordReader, governanc
 			if rowCount+n > rowCap {
 				keep := rowCap - rowCount
 				trimmed := batch.NewSlice(0, int64(keep))
-				batches = append(batches, trimmed)
+				// NewSlice returns an owned record; retain() either
+				// takes a second reference (castInfo == nil) or builds
+				// a new casted record. Either way the slice itself must
+				// be released once we no longer need it directly.
+				kept, err := retain(trimmed)
+				trimmed.Release()
+				if err != nil {
+					return batches, rowCount, fmt.Errorf("decimal cast failed at row %d: %w", rowCount, err)
+				}
+				batches = append(batches, kept)
 				rowCount = rowCap
 				break
 			}
 		}
-		batch.Retain()
-		batches = append(batches, batch)
+		kept, err := retain(batch)
+		if err != nil {
+			return batches, rowCount, fmt.Errorf("decimal cast failed at row %d: %w", rowCount, err)
+		}
+		batches = append(batches, kept)
 		rowCount += n
 	}
 	if err := reader.Err(); err != nil {
 		return batches, rowCount, fmt.Errorf("arrow reader error after %d rows: %w", rowCount, err)
 	}
 	return batches, rowCount, nil
+}
+
+// wrapMsgPackWriteErr tags an encoder error as a client disconnect when it
+// is one.
+//
+// The msgpack encoder writes through the bufio.Writer that fasthttp's stream
+// writer handed us, so once the client hangs up every subsequent Encode*
+// call fails with the underlying socket error — but the encoder returns it
+// bare, with no indication that the cause was the peer rather than the
+// server. isClientError (query.go:143) keys off errClientDisconnected and
+// the context sentinels, so an unwrapped socket error is classified as a
+// server fault and logged at Error.
+//
+// That is how a routine client disconnect ended up logged at Error on the
+// msgpack path while the JSON path — which wraps at its own flush site
+// (query_json_writer.go:180) — correctly logged Warn for the identical
+// condition.
+//
+// Applying this at the two call sites in the emit loop is sound because the
+// only errors reachable there are ctx cancellation (already a client error,
+// passed through untouched below so a genuine timeout is not obscured) and
+// enc.Encode* write failures — the typed column encoders do no I/O of their
+// own and no validation that can fail. Encoding of the header fields above
+// happens before any large write and is left unwrapped.
+func wrapMsgPackWriteErr(err error) error {
+	if err == nil || isClientError(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errClientDisconnected, err)
 }
 
 // streamMsgPackFromBatches writes the query response as a single
@@ -347,8 +434,7 @@ func streamMsgPackFromBatches(
 		// returning the encoder to the shared pool — otherwise the
 		// next consumer (potentially the ingest path or cluster
 		// replication, which expect `msgpack:` tags) silently
-		// inherits our `json` setting. Gemini r3 flagged this as
-		// pool poisoning.
+		// inherits our `json` setting — pool poisoning.
 		enc.SetCustomStructTag("msgpack")
 		enc.Reset(nil)
 		msgpack.PutEncoder(enc)
@@ -398,7 +484,7 @@ func streamMsgPackFromBatches(
 		return 0, err
 	}
 	for _, f := range fields {
-		if err := enc.EncodeString(f.Type.String()); err != nil {
+		if err := enc.EncodeString(arrowTypeName(f.Type)); err != nil {
 			return 0, err
 		}
 	}
@@ -410,7 +496,7 @@ func streamMsgPackFromBatches(
 
 	// Outer data array: one entry per column.
 	if err := enc.EncodeArrayLen(numCols); err != nil {
-		return rowCount, err
+		return rowCount, wrapMsgPackWriteErr(err)
 	}
 
 	// Per-column emit: one type-switch on the first batch's column,
@@ -428,10 +514,10 @@ func streamMsgPackFromBatches(
 		default:
 		}
 		if err := enc.EncodeArrayLen(rowCount); err != nil {
-			return rowCount, fmt.Errorf("encode column %d header: %w", colIdx, err)
+			return rowCount, fmt.Errorf("encode column %d header: %w", colIdx, wrapMsgPackWriteErr(err))
 		}
 		if err := encodeColumn(ctx, enc, batches, colIdx); err != nil {
-			return rowCount, err
+			return rowCount, wrapMsgPackWriteErr(err)
 		}
 		// No explicit Flush per column. bufio.Writer flushes its 4KiB
 		// internal buffer automatically when full; for a multi-MB

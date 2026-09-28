@@ -73,6 +73,9 @@ func (t *HourlyTier) GetTierName() string {
 }
 
 // GetPartitionLevel returns the partition level
+func (t *HourlyTier) GetMinFiles() int {
+	return t.MinFiles
+}
 func (t *HourlyTier) GetPartitionLevel() string {
 	return "hour"
 }
@@ -164,20 +167,25 @@ func (t *HourlyTier) listHourPartitions(ctx context.Context, database, measureme
 	for _, obj := range objects {
 		// Normalize path for Windows compatibility
 		obj = filepath.ToSlash(obj)
-
-		// Parse path: database/measurement/year/month/day/hour/file.parquet
-		parts := strings.Split(obj, "/")
-		if len(parts) < 7 {
+		// Parse the partition components RELATIVE to the database/measurement
+		// prefix rather than at fixed indices: a spoke-namespace
+		// pseudo-database ("rocket-01/telemetry") carries a slash, so
+		// parts[0] would be the spoke segment and the year would land at
+		// parts[3]. The List prefix already scopes objects to this
+		// database/measurement, so trimming the prefix is both simpler and
+		// correct for plain and pseudo databases alike.
+		rel, ok := strings.CutPrefix(obj, prefix)
+		if !ok {
 			continue
 		}
 
-		db, meas, year, month, day, hour := parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
-
-		// Validate database and measurement
-		if db != database || meas != measurement {
+		parts := strings.Split(rel, "/")
+		if len(parts) < 5 {
+			// year/month/day/hour/file.parquet
 			continue
 		}
 
+		year, month, day, hour := parts[0], parts[1], parts[2], parts[3]
 		// Validate hour is a valid hour (00-23)
 		hourInt, err := strconv.Atoi(hour)
 		if err != nil || hourInt < 0 || hourInt > 23 {

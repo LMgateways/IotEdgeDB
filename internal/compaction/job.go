@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"iedb/internal/database"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +20,12 @@ import (
 
 	"github.com/rs/zerolog"
 )
+
+// errNoTimeColumn is returned by compactFiles when no input file has a "time"
+// column. Job.Run treats it as a clean skip (complete with zero files, sources
+// left in place), not a failure — the partition is outside IEDB's data model and
+// retrying can never succeed.
+var errNoTimeColumn = errors.New("no 'time' column in any input file")
 
 // escapeSQLString escapes single quotes for safe use in DuckDB SQL string literals.
 // This prevents SQL injection when interpolating configuration values.
@@ -135,6 +143,22 @@ type Job struct {
 	BytesAfter      int64
 	DurationSeconds float64
 
+	// sourcesDeleted records that deleteOldFiles fully succeeded. Under
+	// ParentFinalizesManifest, the manifest may be handed to the parent for
+	// finalization ONLY in that case: on a partial deletion failure the
+	// manifest is the surviving raws' only recovery path, and the parent
+	// deleting it would let them be re-compacted into a duplicate output.
+	sourcesDeleted bool
+
+	// ParentFinalizesManifest: on full success, leave the crash-recovery
+	// storage manifest for the PARENT to delete after edge-sync receipt
+	// marking commits. See SubprocessJobConfig.ParentFinalizesManifest.
+	ParentFinalizesManifest bool
+
+	// OutputStorageKey is the storage-relative key of the compacted output,
+	// set once the output name is fixed (before upload). Empty for jobs that
+	// produce no output (all sources vanished, or no time column).
+	OutputStorageKey string
 	// Phase 4: cluster-mode completion manifest. When CompletionDir is
 	// non-empty, the job writes a local-disk CompletionManifest at each
 	// state transition so the parent-side CompletionWatcher can apply
@@ -177,6 +201,8 @@ type JobConfig struct {
 	// is written and the job is byte-compatible with pre-Phase-4 behavior.
 	CompletionDir string
 
+	// ParentFinalizesManifest — see Job.ParentFinalizesManifest.
+	ParentFinalizesManifest bool
 	// JobID, if set, overrides the auto-generated JobID. Phase 4 uses this
 	// so the parent (which spawns the subprocess) and the subprocess agree
 	// on the completion-manifest filename. Empty means auto-generate.
@@ -216,22 +242,23 @@ func NewJob(cfg *JobConfig) *Job {
 	}
 
 	return &Job{
-		Measurement:     cfg.Measurement,
-		PartitionPath:   cfg.PartitionPath,
-		Files:           cfg.Files,
-		StorageBackend:  cfg.StorageBackend,
-		Database:        cfg.Database,
-		Tier:            cfg.Tier,
-		BatchNumber:     cfg.BatchNumber,
-		TempDirectory:   tempDir,
-		SortKeys:        sortKeys,
-		JobID:           jobID,
-		Status:          JobStatusPending,
-		CompletionDir:   cfg.CompletionDir,
-		PartitionTime:   cfg.PartitionTime,
-		logger:          cfg.Logger.With().Str("job_id", jobID).Logger(),
-		db:              cfg.DB,
-		manifestManager: cfg.ManifestManager,
+		Measurement:             cfg.Measurement,
+		PartitionPath:           cfg.PartitionPath,
+		Files:                   cfg.Files,
+		StorageBackend:          cfg.StorageBackend,
+		Database:                cfg.Database,
+		Tier:                    cfg.Tier,
+		BatchNumber:             cfg.BatchNumber,
+		TempDirectory:           tempDir,
+		SortKeys:                sortKeys,
+		JobID:                   jobID,
+		Status:                  JobStatusPending,
+		CompletionDir:           cfg.CompletionDir,
+		ParentFinalizesManifest: cfg.ParentFinalizesManifest,
+		PartitionTime:           cfg.PartitionTime,
+		logger:                  cfg.Logger.With().Str("job_id", jobID).Logger(),
+		db:                      cfg.DB,
+		manifestManager:         cfg.ManifestManager,
 	}
 }
 
@@ -293,6 +320,7 @@ func (j *Job) Run(ctx context.Context) error {
 
 	if len(downloadedFiles) == 0 {
 		j.logger.Info().Msg("All files already compacted, skipping")
+		j.discardCompletionManifest()
 		return j.complete()
 	}
 
@@ -308,6 +336,24 @@ func (j *Job) Run(ctx context.Context) error {
 	// This allows GC to reclaim memory from the file metadata before upload/delete phases.
 	downloadedFiles = nil
 
+	if errors.Is(err, errNoTimeColumn) {
+		// Not compactable, ever: no input file has a "time" column, so neither
+		// the REPLACE("time") normalization nor the default ORDER BY "time" can
+		// bind. Complete as a zero-file skip (compactedFiles is empty, so
+		// nothing is uploaded or deleted) rather than failing — a failure here
+		// would repeat every cycle and, pre-classification-fix, walked the
+		// whole adaptive retry ladder on a deterministic error.
+		j.logger.Warn().
+			Str("database", j.Database).
+			Str("partition", j.PartitionPath).
+			Msg("Skipping compaction: no 'time' column in any input file (data was not written by IEDB ingest); leaving source files in place")
+		// Zero the download-phase byte count: nothing was compacted, and a
+		// non-zero BytesBefore with BytesAfter 0 would log as a 100%
+		// compression ratio and count toward the manager's total_bytes_saved.
+		j.BytesBefore = 0
+		j.discardCompletionManifest()
+		return j.complete()
+	}
 	if err != nil {
 		return j.fail(fmt.Errorf("failed to compact files: %w", err))
 	}
@@ -326,6 +372,10 @@ func (j *Job) Run(ctx context.Context) error {
 
 	// Upload compacted file
 	compactedKey := filepath.Join(j.PartitionPath, filepath.Base(compactedFile))
+	// Recorded on the Job so the subprocess result can carry the STORAGE key
+	// to the parent (compactFiles returns the local temp path, which no
+	// parent-side consumer can match against storage listings).
+	j.OutputStorageKey = compactedKey
 
 	// Write manifest BEFORE upload to enable crash recovery
 	// If we crash after upload but before deletion, the manifest allows recovery
@@ -382,8 +432,15 @@ func (j *Job) Run(ctx context.Context) error {
 		// Don't fail the job - manifest will enable recovery on next cycle
 		// The manifest remains so recovery can retry deletion
 	} else {
-		// Deletion succeeded - delete the manifest
-		if j.manifestManager != nil && j.manifestPath != "" {
+		// Deletion succeeded - delete the manifest, UNLESS the parent asked
+		// to finalize: it marks edge-sync receipts for the consumed inputs
+		// first and deletes the manifest itself, so a crash in between
+		// re-fires the marks via recovery instead of silently losing them.
+		j.sourcesDeleted = true
+		if j.ParentFinalizesManifest {
+			j.logger.Debug().Str("manifest", j.manifestPath).
+				Msg("Leaving manifest for the parent to finalize after receipt marking")
+		} else if j.manifestManager != nil && j.manifestPath != "" {
 			if delErr := j.manifestManager.DeleteManifest(ctx, j.manifestPath); delErr != nil {
 				j.logger.Warn().Err(delErr).Msg("Failed to delete manifest after successful deletion")
 				// Non-fatal - manifest will be cleaned up during recovery
@@ -586,6 +643,15 @@ func (j *Job) compactFiles(ctx context.Context, files []downloadedFile, tempDir 
 	// sequentially for the same partition (SplitCandidateIntoBatches).
 	// Without it, batches within the same second produce identical filenames
 	// and each overwrites the previous, destroying data.
+	//
+	// The batch segment is belt-and-braces on top of nanos: wall-clock
+	// resolution is coarser than 1ns on some platforms (macOS in particular),
+	// and lowering compaction.max_files_per_batch multiplies the number of
+	// sibling batches competing for a distinct timestamp. BatchNumber is
+	// exactly the field that distinguishes them, so use it rather than relying
+	// on the clock alone. The uploaded storage key derives from this basename
+	// (see Job.Run), so a collision here would silently overwrite a sibling
+	// batch's compacted output.
 	now := time.Now().UTC()
 	timestamp := now.Format("20060102_150405")
 	suffix := "compacted"
@@ -641,6 +707,19 @@ func (j *Job) compactFiles(ctx context.Context, files []downloadedFile, tempDir 
 		fileListSQL += "]"
 	}
 
+	// A partition whose files have no "time" column at all can never compact:
+	// the REPLACE("time") normalization in buildCompactionQuery and the default
+	// ORDER BY "time" both fail to bind, deterministically, at any batch size.
+	// Probe the unified schema up front (footer-only read) and skip cleanly
+	// instead of surfacing a Binder Error every cycle. A probe FAILURE is not a
+	// skip — proceed and let the compaction query produce the authoritative
+	// error, so a transient read problem doesn't silently strand a partition.
+	hasTime, err := parquetFilesHaveTimeColumn(ctx, db, fileListSQL)
+	if err != nil {
+		j.logger.Warn().Err(err).Msg("Failed to probe parquet schema for time column; attempting compaction anyway")
+	} else if !hasTime {
+		return "", errNoTimeColumn
+	}
 	// Build ORDER BY clause from sort keys
 	// This ensures compacted files maintain the same sort order as ingested files
 	orderByClause := buildOrderByClause(j.SortKeys)
@@ -715,6 +794,26 @@ func (j *Job) compactFiles(ctx context.Context, files []downloadedFile, tempDir 
 		}
 		conn.Close()
 	}()
+	// Without configured sort keys the compaction SQL has no ORDER BY, so the
+	// merged output's row order comes from the scan itself. Force
+	// preserve_insertion_order on this pinned session so the output keeps
+	// per-source-file row order (typically time-sorted) even when the
+	// database-wide setting is false. Registered after the Close defer above,
+	// so the restore runs before the connection returns to the pool.
+	//
+	// In the shipping configuration this is a no-op: compaction runs in a
+	// subprocess whose raw DuckDB never goes through configureDatabase, so
+	// its preserve_insertion_order sits at DuckDB's default (true). The
+	// force is what keeps ordering correct if compaction is ever moved
+	// in-process onto the configured database (a refactor duckdb.go
+	// explicitly anticipates).
+	if orderByClause == "" {
+		restore, err := database.ForcePreserveInsertionOrder(ctx, conn)
+		if err != nil {
+			return "", fmt.Errorf("failed to force preserve_insertion_order for compaction: %w", err)
+		}
+		defer restore()
+	}
 	for _, stmt := range stmts {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return "", fmt.Errorf("failed to execute compaction query: %w", err)
@@ -843,18 +942,30 @@ func (j *Job) writeOutputWrittenManifest(_ context.Context, localPath, storageKe
 
 	now := time.Now().UTC()
 	m := &CompletionManifest{
-		JobID:         j.JobID,
-		Database:      j.Database,
+		JobID: j.JobID,
+		// For a spoke-namespace pseudo-database ("rocket-01/telemetry") the
+		// Raft manifest entry must carry the spoke's OWN database — the same
+		// labeling the received raws got at receive time — or the watcher
+		// would register the output under one scheme while DeleteFile
+		// removes sources labeled under the other. Routing
+		// never keys on this field; paths remain authoritative.
+		Database:      canonicalManifestDatabase(j.Database),
 		Measurement:   j.Measurement,
 		PartitionPath: j.PartitionPath,
 		Tier:          j.Tier,
 		State:         CompletionStateOutputWritten,
 		Outputs: []CompactedOutput{
 			{
-				Path:          storageKey,
-				SHA256:        sum,
-				SizeBytes:     j.BytesAfter,
-				Database:      j.Database,
+				Path:      storageKey,
+				SHA256:    sum,
+				SizeBytes: j.BytesAfter,
+				// THIS is the field the watcher reads into the Raft
+				// FileEntry (watcher.go builds CompactedFile from Outputs),
+				// so it must carry the canonical database like the top-level
+				// field above — the received raws were registered under the
+				// spoke's own database, and a pseudo-database here would
+				// split the manifest's database index.
+				Database:      canonicalManifestDatabase(j.Database),
 				Measurement:   j.Measurement,
 				PartitionTime: j.PartitionTime,
 				Tier:          j.Tier,
@@ -922,6 +1033,23 @@ func (j *Job) writeSourcesDeletedManifest() error {
 		Int("deleted_sources", len(prev.DeletedSources)).
 		Msg("Phase 4 completion manifest: sources_deleted")
 	return nil
+}
+
+// discardCompletionManifest removes the Phase 4 writing_output completion
+// manifest for a job that completes WITHOUT producing output (a no-time-column
+// skip, or all files already compacted). Run() writes that manifest before the
+// outcome is known; a zero-work completion never advances it to
+// output_written, so the watcher will never consume it — and a partition that
+// skips every cycle would otherwise accumulate one orphaned manifest file per
+// cycle, only swept at restart. Idempotent and a no-op in OSS mode.
+func (j *Job) discardCompletionManifest() {
+	if !j.clusterMode() {
+		return
+	}
+	path := filepath.Join(j.CompletionDir, j.JobID+".json")
+	if err := deleteCompletionManifest(path); err != nil {
+		j.logger.Warn().Err(err).Str("path", path).Msg("Failed to remove completion manifest for zero-work job; orphan sweep will collect it")
+	}
 }
 
 // cleanupTemp removes the temporary directory
@@ -1081,4 +1209,34 @@ func (j *Job) removeDirectoryTree(ctx context.Context, remover storage.Directory
 	// Try parent directory
 	parent := filepath.Dir(dir)
 	return 1 + j.removeDirectoryTree(ctx, remover, parent)
+}
+
+// CompactedInputKeys returns the storage keys of the sources this job
+// actually consumed and deleted — the validated set only. Nil until the job
+// has run.
+func (j *Job) CompactedInputKeys() []string {
+	return j.compactedFiles
+}
+
+// RetainedManifestPath returns the crash-recovery manifest path the job
+// deliberately left in place under ParentFinalizesManifest, or "" when the
+// manifest was deleted (or never written).
+func (j *Job) RetainedManifestPath() string {
+	if !j.ParentFinalizesManifest || !j.sourcesDeleted {
+		// A partial source-deletion failure keeps the manifest as the
+		// surviving raws' ONLY recovery path; the parent must not delete it.
+		// Recovery both retries the deletes and re-fires the marks.
+		return ""
+	}
+	return j.manifestPath
+}
+
+// canonicalManifestDatabase maps a spoke-namespace pseudo-database
+// ("{spoke}/{db}") to the database name its files were registered under at
+// receive time ({db}); plain names pass through.
+func canonicalManifestDatabase(database string) string {
+	if _, rest, found := strings.Cut(database, "/"); found && rest != "" {
+		return rest
+	}
+	return database
 }

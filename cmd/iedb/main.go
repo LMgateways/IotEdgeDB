@@ -66,11 +66,10 @@ const uploadSubdirName = "iedb-uploads"
 // cacheInvalidateHMACTolerance is the freshness window for HMACs on the
 // cluster cache-invalidate fan-out. Aliased to the package-wide
 // security.HMACTimestampTolerance so a future change to the cluster's
-// HMAC freshness window propagates here automatically — Gemini round 1
-// on the hardcoded constants scattered across the
-// codebase. Shared between the NonceCache TTL and the receiver-side
-// ValidateCacheInvalidateHMAC call so a nonce expires from the cache
-// at the same instant its MAC would be rejected as stale.
+// HMAC freshness window propagates here automatically. Shared between
+// the NonceCache TTL and the receiver-side ValidateCacheInvalidateHMAC
+// call so a nonce expires from the cache at the same instant its MAC
+// would be rejected as stale.
 const cacheInvalidateHMACTolerance = security.HMACTimestampTolerance
 
 func main() {
@@ -201,6 +200,8 @@ func main() {
 		EnableWAL:      cfg.Database.EnableWAL,
 		TempDirectory:  cfg.Database.TempDirectory,
 		TimeZone:       cfg.Database.TimeZone,
+		// DuckDB result ordering (database.preserve_insertion_order).
+		PreserveInsertionOrder: cfg.Database.PreserveInsertionOrder,
 		// S3 configuration for httpfs extension (enables DuckDB to query S3 directly)
 		S3Region:    cfg.Storage.S3Region,
 		S3AccessKey: cfg.Storage.S3AccessKey,
@@ -220,8 +221,12 @@ func main() {
 		AzureAccountName:      cfg.Storage.AzureAccountName,
 		AzureAccountKey:       cfg.Storage.AzureAccountKey,
 		AzureConnectionString: cfg.Storage.AzureConnectionString,
-		AzureEndpoint:         cfg.Storage.AzureEndpoint,
-		AzureContainer:        cfg.Storage.AzureContainer,
+		// A SAS-scoped deployment must not be classified as SDK-managed: the
+		// credential gate would otherwise start the managed-identity refresher,
+		// acquiring a broader identity than the operator granted.
+		AzureSASToken:  cfg.Storage.AzureSASToken,
+		AzureEndpoint:  cfg.Storage.AzureEndpoint,
+		AzureContainer: cfg.Storage.AzureContainer,
 		// Primary-backend signal for Azure (mirrors S3IsPrimaryBackend): only an
 		// azure/azblob primary backend provisions a primary Azure secret.
 		AzureIsPrimaryBackend: cfg.Storage.Backend == "azure" || cfg.Storage.Backend == "azblob",
@@ -280,8 +285,8 @@ func main() {
 		//   Zl — line separator (U+2028)
 		//   Zp — paragraph separator (U+2029)
 		// unicode.IsControl covers Cc; unicode.In with the others closes
-		// the bidi / invisible-character bypass surface gemini will look
-		// for. Reject loudly rather than try to interpret these.
+		// the bidi / invisible-character bypass surface. Reject loudly
+		// rather than try to interpret these.
 		for _, r := range p {
 			if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 				log.Fatal().Str("setting", name).Str("path", p).Msg("Configured path contains control, formatting, or line/paragraph-separator characters; refusing to start")
@@ -707,7 +712,26 @@ func main() {
 		recoveryCallback := createWALRecoveryCallback(arrowBuffer, logger.Get("wal-recovery"))
 		columnarCallback := createColumnarRecoveryCallback(arrowBuffer, logger.Get("wal-recovery"))
 
+		// SkipActiveFile is REQUIRED: the WAL writer was created
+		// above and has already rotated in its active (header-only) file.
+		// Without the skip, recovery treats that file as an empty leftover
+		// and DELETES it — the writer then appends to an unlinked inode for
+		// the whole session and the WAL provides no crash durability. The
+		// periodic flush-failure recovery below always passed this; the
+		// startup call was the one that forgot.
+		startupActiveFile := ""
+		if walWriter != nil {
+			startupActiveFile = walWriter.CurrentFile()
+		}
+		// NOTE: no MinFileAge here — startup recovery runs exactly once,
+		// before any ingest, so there is no rotation race (the active file
+		// is fully identified by SkipActiveFile), and a just-crashed
+		// server's WAL file may legitimately be seconds old. Skipping it
+		// would strand its data until the next restart. The age guard is
+		// for the PERIODIC flush-failure recovery below, where ingest (and
+		// therefore rotation) is live during the scan.
 		recoveryStats, err := walRecovery.RecoverWithOptions(context.Background(), recoveryCallback, &wal.RecoveryOptions{
+			SkipActiveFile:   startupActiveFile,
 			BatchSize:        cfg.WAL.RecoveryBatchSize,
 			ColumnarCallback: columnarCallback,
 		})
@@ -779,6 +803,7 @@ func main() {
 						}
 						stats, err := recovery.RecoverWithOptions(context.Background(), recoveryCallback, &wal.RecoveryOptions{
 							SkipActiveFile:   activeFile,
+							MinFileAge:       5 * time.Second,
 							BatchSize:        cfg.WAL.RecoveryBatchSize,
 							ColumnarCallback: columnarCallback,
 						})
@@ -866,9 +891,8 @@ func main() {
 			// exp backoff (250+500+1000ms ≈ 1.75s) ≈ 22s. If the cluster
 			// genuinely never elects a leader the timeout cancels the
 			// loop cleanly and we surface the error rather than blocking
-			// startup indefinitely. Internal review #2 (post-Gemini round
-			// 3) flagged the previous 10s ceiling as too tight against
-			// proposeTimeout=5s.
+			// startup indefinitely. The previous 10s ceiling was too
+			// tight against proposeTimeout=5s.
 			bootstrapCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if cfg.Auth.ForceBootstrap && cfg.Auth.BootstrapToken != "" {
@@ -1074,11 +1098,18 @@ func main() {
 		// Create compaction manager (discovers all databases dynamically)
 		// Compaction jobs run in subprocesses for memory isolation
 		compactionManager = compaction.NewManager(&compaction.ManagerConfig{
-			StorageBackend: storageBackend,
-			LockManager:    lockManager,
-			MaxConcurrent:  cfg.Compaction.MaxConcurrent,
-			MemoryLimit:    cfg.Database.MemoryLimit, // Use same limit as main DuckDB
-			CompletionDir:  completionDir,            // Phase 4: empty in OSS, set in cluster mode
+			StorageBackend:   storageBackend,
+			LockManager:      lockManager,
+			MaxConcurrent:    cfg.Compaction.MaxConcurrent,
+			MaxFilesPerBatch: cfg.Compaction.MaxFilesPerBatch,
+			// Per-subprocess DuckDB bounds. Config resolves the "auto"
+			// sentinels at load time: memory_limit defaults to
+			// database.memory_limit / max_concurrent (so compaction's
+			// worst case stays ~one database.memory_limit total, not
+			// max_concurrent times it), threads to half the cores.
+			MemoryLimit:   cfg.Compaction.MemoryLimit,
+			Threads:       cfg.Compaction.Threads,
+			CompletionDir: completionDir, // Phase 4: empty in OSS, set in cluster mode
 			// Pass the SAME absolute-resolved value the DB-layer sandbox
 			// allowlist references — dbConfig.CompactionTempDirectory has
 			// already been through resolveAbsPath. Using the raw
@@ -1242,9 +1273,9 @@ func main() {
 				// join/heartbeat/leave messages (the checks are gated on a
 				// non-empty secret), so any host that can reach the coordinator
 				// port could join as a trusted node. Fail closed rather than
-				// run an unauthenticated cluster (GHSA-p378-jp5r-gpgw). This
-				// guard is only reachable by a clustering-licensed instance
-				// (the standalone-fallback branches above handle the unlicensed
+				// run an unauthenticated cluster. This guard is only
+				// reachable by a clustering-licensed instance (the
+				// standalone-fallback branches above handle the unlicensed
 				// case), so it never affects single-node deployments.
 				if cfg.Cluster.SharedSecret == "" {
 					log.Error().Msg("cluster.enabled requires IEDB_CLUSTER_SHARED_SECRET to be set (cluster join and heartbeat messages must be authenticated)")
@@ -1582,6 +1613,13 @@ func main() {
 
 	server := api.NewServer(serverConfig, logger.Get("server"))
 
+	// Surface per-tier storage credential state in /health (and /ready
+	// when the knob is set). In-memory reads from the credential refresher —
+	// never a live S3/Azure probe from the probe path.
+	server.SetStorageStatus(db.StorageCredentialStatus, cfg.Server.StorageCredentialsFailReady)
+	if cfg.Server.StorageCredentialsFailReady && cfg.Cluster.Enabled && cfg.Cluster.Role == string(cluster.RoleWriter) {
+		log.Warn().Msg("server.storage_credentials_fail_ready is set on a writer: expired S3 credentials will drain this node from the LB even though ingest is unaffected by credential expiry; intended for reader pools")
+	}
 	// Register base routes
 	server.RegisterRoutes()
 
@@ -1611,7 +1649,7 @@ func main() {
 		// dashboards poll them without a token. Whitelist them explicitly so
 		// their public status is an auditable decision, not an accident of
 		// registration order (they were previously reachable only because
-		// RegisterRoutes runs before this middleware; see GHSA-m3qr-fvp4-78xj).
+		// RegisterRoutes runs before this middleware).
 		// /api/v1/logs, by contrast, is NOT public — it is registered with admin
 		// auth below.
 		middlewareConfig.PublicPrefixes = append(middlewareConfig.PublicPrefixes, "/api/v1/metrics")
@@ -1619,7 +1657,7 @@ func main() {
 
 		// Register the admin-authenticated logs route AFTER the auth
 		// middleware so it sits later in the Fiber stack and is actually
-		// gated (GHSA-m3qr-fvp4-78xj).
+		// gated.
 		server.RegisterLogsRoute(authManager)
 		// Initialize RBAC Manager (Enterprise feature)
 		rbacManager = auth.NewRBACManager(&auth.RBACManagerConfig{
@@ -1751,7 +1789,7 @@ func main() {
 					// completing it asynchronously is safe — followers
 					// don't reach the seed body at all (IsLeader check),
 					// and a re-elected leader will pick it up on its own
-					// startup..
+					// startup.
 					//
 					// Wire shutdown signal into the goroutine via a
 					// cancellable seedCtx that a shutdown hook fires. If
@@ -1760,7 +1798,7 @@ func main() {
 					// pod), we cancel mid-seed instead of fighting the
 					// database close. The cancel is also called in defer
 					// for the success path so the parent ctx never
-					// leaks..
+					// leaks.
 					seedCtx, seedCancel := context.WithCancel(context.Background())
 					// Fire before everything else (priority < PriorityHTTPServer=10)
 					// so the seed goroutine bails as soon as shutdown begins,
@@ -1794,7 +1832,7 @@ func main() {
 		// Authentication disabled: register the logs route unguarded so the
 		// endpoint still works for no-auth deployments. (When auth is enabled
 		// it is registered with admin auth inside the block above, after the
-		// middleware — GHSA-m3qr-fvp4-78xj.)
+		// middleware.)
 		server.RegisterLogsRoute(nil)
 	}
 
@@ -1894,6 +1932,9 @@ func main() {
 	queryHandler := api.NewQueryHandler(db, storageBackend, logger.Get("query"), cfg.Query.Timeout, cfg.Query.SlowQueryThresholdMs)
 	if authManager != nil && rbacManager != nil {
 		queryHandler.SetAuthAndRBAC(authManager, rbacManager)
+	}
+	if cfg.Query.FileTimePruning {
+		queryHandler.SetFileTimePruning(true, time.Duration(cfg.Query.FileTimePruningMarginSeconds)*time.Second)
 	}
 	// Initialize agent registry and handler for edge ingest agent support.
 	// Agents register via REST API and report table metadata via heartbeat;
@@ -2621,7 +2662,9 @@ func main() {
 				ConnectionString: cold.AzureConnectionString,
 				AccountName:      cold.AzureAccountName,
 				AccountKey:       cold.AzureAccountKey,
+				SASToken:         cold.AzureSASToken,
 				Container:        cold.AzureContainer,
+				Endpoint:         cold.AzureEndpoint,
 			}); err != nil {
 				log.Warn().Err(err).Msg("Failed to configure DuckDB with cold tier Azure credentials")
 			} else {
@@ -2676,7 +2719,7 @@ func main() {
 	// observe /ready=503 and stop routing before the listener closes.
 	// In standalone mode there's no LB / no peer cluster — the grace
 	// just delays every shutdown for no benefit (local dev, integration
-	// tests). Skip it entirely. (Gemini
+	// tests). Skip it entirely.
 	readyDrainGrace := 10 * time.Second
 	if !cfg.Cluster.Enabled {
 		readyDrainGrace = 0

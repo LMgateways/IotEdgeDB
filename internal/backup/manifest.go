@@ -51,6 +51,7 @@ type Progress struct {
 	Status         string     `json:"status"` // "running", "completed", "failed"
 	TotalFiles     int64      `json:"total_files"`
 	ProcessedFiles int64      `json:"processed_files"`
+	SkippedFiles   int64      `json:"skipped_files"`
 	TotalBytes     int64      `json:"total_bytes"`
 	ProcessedBytes int64      `json:"processed_bytes"`
 	StartedAt      time.Time  `json:"started_at"`

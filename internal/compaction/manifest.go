@@ -176,7 +176,20 @@ func (m *ManifestManager) ListManifests(ctx context.Context) ([]string, error) {
 
 // RecoverOrphanedManifests finds and processes orphaned manifests from interrupted compactions.
 // Returns the number of manifests recovered and any error encountered.
-func (m *ManifestManager) RecoverOrphanedManifests(ctx context.Context) (int, error) {
+// onKeptOutput, when non-nil, receives the storage key of every compacted
+// output recovery decides to KEEP: recovery completes
+// compactions outside CompactPartition, so without it the edge sync ledger
+// would never learn about the output. Passed as an argument rather than
+// stored on the struct — the caller (Manager) copies it under its own mutex,
+// which keeps the scheduler-goroutine read free of the wiring race a stored
+// field would have (main.go wires observers after the schedulers start).
+// onConsumedInputs, when non-nil, receives manifest.InputFiles once their
+// deletion has fully succeeded on the KEPT-output branch — never on the
+// output-missing branch, whose inputs were not consumed.
+// Fired BEFORE the manifest is deleted; a returned ERROR keeps the manifest
+// so the next recovery pass re-fires the marks (consumers are idempotent) —
+// deleting it despite a failed mark would silently lose them.
+func (m *ManifestManager) RecoverOrphanedManifests(ctx context.Context, onKeptOutput func(storageKey string), onConsumedInputs func(inputs []string) error) (int, error) {
 	manifests, err := m.ListManifests(ctx)
 	if err != nil {
 		// ListManifests already describes the failure.
@@ -197,7 +210,7 @@ func (m *ManifestManager) RecoverOrphanedManifests(ctx context.Context) (int, er
 		default:
 		}
 
-		if err := m.recoverManifest(ctx, manifestPath); err != nil {
+		if err := m.recoverManifest(ctx, manifestPath, onKeptOutput, onConsumedInputs); err != nil {
 			m.logger.Error().Err(err).Str("manifest", manifestPath).Msg("Failed to recover manifest")
 			continue
 		}
@@ -215,7 +228,7 @@ func (m *ManifestManager) RecoverOrphanedManifests(ctx context.Context) (int, er
 }
 
 // recoverManifest processes a single orphaned manifest
-func (m *ManifestManager) recoverManifest(ctx context.Context, manifestPath string) error {
+func (m *ManifestManager) recoverManifest(ctx context.Context, manifestPath string, onKeptOutput func(storageKey string), onConsumedInputs func(inputs []string) error) error {
 	manifest, err := m.ReadManifest(ctx, manifestPath)
 	if err != nil {
 		// If we can't read the manifest, delete it and let compaction retry
@@ -277,6 +290,14 @@ func (m *ManifestManager) recoverManifest(ctx context.Context, manifestPath stri
 		}
 	}
 
+	// Output file exists and is valid — the output is being KEPT, so tell
+	// the edge sync observer now, before input deletion: a partial deletion
+	// failure retries this manifest next cycle, and the consumer is
+	// idempotent, so firing early is safe while firing late risks a window
+	// where discovery syncs the output.
+	if onKeptOutput != nil {
+		onKeptOutput(manifest.OutputPath)
+	}
 	// Output file exists and is valid - complete the deletion of input files
 	m.logger.Info().
 		Str("manifest", manifestPath).
@@ -305,6 +326,15 @@ func (m *ManifestManager) recoverManifest(ctx context.Context, manifestPath stri
 		return fmt.Errorf("failed to delete %d of %d input files", deleteErrors, len(manifest.InputFiles))
 	}
 
+	// All input files deleted. Fire the consumed-inputs observer BEFORE
+	// removing the manifest: if the marks (or this process) die here, the
+	// surviving manifest re-runs this branch and re-fires them. A
+	// mark failure KEEPS the manifest for the same reason.
+	if onConsumedInputs != nil {
+		if err := onConsumedInputs(manifest.InputFiles); err != nil {
+			return fmt.Errorf("receipt marking incomplete; keeping manifest for re-fire: %w", err)
+		}
+	}
 	// All input files deleted — safe to remove manifest
 	return m.DeleteManifest(ctx, manifestPath)
 }

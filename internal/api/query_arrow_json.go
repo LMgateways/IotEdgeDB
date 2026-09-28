@@ -19,6 +19,7 @@ import (
 
 	"iedb/internal/database"
 	"iedb/internal/metrics"
+	sqlutil "iedb/internal/sql"
 )
 
 func init() {
@@ -118,7 +119,7 @@ func executeArrowJSONQuery(
 		if onFail != nil {
 			onFail(err.Error())
 		}
-		h.logger.Error().Err(err).Str("sql", convertedSQL).Msg("Arrow JSON query failed")
+		h.logger.Error().Err(err).Str("sql", sqlutil.ForLog(convertedSQL)).Msg("Arrow JSON query failed")
 		c.Status(fiber.StatusInternalServerError).JSON(QueryResponse{
 			Success:         false,
 			Error:           err.Error(),
@@ -135,8 +136,35 @@ func executeArrowJSONQuery(
 	// SetBodyStreamWriter runs asynchronously — metrics are recorded in the callback.
 	streamCtx := ctx
 	c.Set("Content-Type", "application/json")
+	// Accept-Encoding negotiation must happen (and the header must be set)
+	// before the body starts streaming; headers are committed at first byte.
+	respEncoding := negotiateResponseCompression(c)
+	// Vary is sent whenever negotiation happens (shared caches must key on
+	// Accept-Encoding even for identity responses); c.Vary appends with
+	// dedup rather than clobbering values set by other middleware.
+	c.Vary(fiber.HeaderAcceptEncoding)
+	if respEncoding != "" {
+		c.Set(fiber.HeaderContentEncoding, respEncoding)
+	}
 	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
-		rc, streamErr := streamArrowJSON(streamCtx, w, reader, governanceMaxRows, profile, start, timestamp)
+		// With compression the body is produced into a pooled encoder that
+		// feeds w; a fresh bufio in front batches the per-value writes
+		// before compression. Without it, sink == w and this is the
+		// pre-existing path byte-for-byte.
+		sink, finishCompression := compressedSink(w, respEncoding)
+		bw, isBufio := sink.(*bufio.Writer)
+		isWrapped := false
+		if !isBufio {
+			bw = bufio.NewWriterSize(sink, 64*1024)
+			isWrapped = true
+		}
+		rc, streamErr := streamArrowJSON(streamCtx, bw, reader, governanceMaxRows, profile, start, timestamp)
+		bw.Flush()
+		if isWrapped {
+			if err := finishCompression(); err != nil && streamErr == nil {
+				streamErr = err
+			}
+		}
 		w.Flush()
 
 		reader.Release()
@@ -197,8 +225,7 @@ func executeArrowJSONQuery(
 // Returns (rowsWritten, err). Errors that may occur after the response
 // envelope has been opened cannot retroactively change the HTTP status —
 // but the caller MUST surface them so operators see the partial-result
-// signal instead of recording Complete(rowCount). See review/query-path-
-// criticals C5.
+// signal instead of recording Complete(rowCount).
 //
 // Returned error sources:
 //   - ctx cancellation observed at a batch boundary (timeout / client-
@@ -238,7 +265,7 @@ batchLoop:
 		// Per-batch ctx check: a timeout firing or client disconnect
 		// must short-circuit instead of draining DuckDB into a buffer
 		// nobody reads. Non-blocking select with labeled break is the
-		// idiomatic Go cancellation pattern (gemini r1).
+		// idiomatic Go cancellation pattern.
 		select {
 		case <-ctx.Done():
 			streamErr = fmt.Errorf("stream cancelled at row %d: %w", rowCount, ctx.Err())

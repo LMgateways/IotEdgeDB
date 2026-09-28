@@ -227,7 +227,7 @@ func (h *ContinuousQueryHandler) initTables() error {
 		return fmt.Errorf("failed to create continuous_queries table: %w", err)
 	}
 
-	// Migration: add tag_columns to pre-existing databases (#521). The column
+	// Migration: add tag_columns to pre-existing databases. The column
 	// holds a JSON-encoded []string of grouping-dimension output columns, used
 	// as the Parquet iedb:tags dedup key. A duplicate-column error means an
 	// already-migrated DB — ignore it; any other error is fatal.
@@ -328,6 +328,11 @@ func (h *ContinuousQueryHandler) handleCreate(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "query must contain {start_time} and {end_time} placeholders",
 		})
+	}
+
+	// Run the shared SQL validator over the definition before storing it.
+	if err := validateCQQuery(req.Query); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	// Validate tag columns before storing — they end up in Parquet iedb:tags
@@ -433,6 +438,12 @@ func (h *ContinuousQueryHandler) handleUpdate(c *fiber.Ctx) error {
 		})
 	}
 	if err := validateTagColumns(req.TagColumns); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	// UPDATE overwrites the stored definition, so the new body needs the same
+	// validation handleCreate applies — otherwise a create-time check is
+	// trivially bypassed by creating a benign CQ and immediately updating it.
+	if err := validateCQQuery(req.Query); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	tagColumnsJSON, err := encodeTagColumns(req.TagColumns)
@@ -886,7 +897,7 @@ func (h *ContinuousQueryHandler) executeAggregation(ctx context.Context, cq *Con
 
 	// Ensure time column exists (as int64 microseconds).
 	// When the aggregation query does not select a time column, stamp every row
-	// with the WINDOW START time — not time.Now() (#521). time.Now() gave rows a
+	// with the WINDOW START time — not time.Now(). time.Now() gave rows a
 	// wall-clock ingestion timestamp (wrong for a time-series) and made a re-run
 	// of the same window produce rows with a DIFFERENT timestamp, so they could
 	// never be deduped. The window start is stable across re-runs, so duplicate
@@ -1191,7 +1202,7 @@ const maxUniquenessCheckRows = 100_000
 
 // timeColumnIsUnique reports whether the time column has no duplicate values —
 // i.e. time alone is a unique key for the output. Used to decide whether a
-// tagless CQ is safe to mark for time-only dedup (#521): if two rows share a
+// tagless CQ is safe to mark for time-only dedup: if two rows share a
 // timestamp with no tag to distinguish them, time-only dedup would lose one, so
 // the marker must be withheld. An empty/absent column is trivially unique.
 //
@@ -1252,4 +1263,31 @@ func (h *ContinuousQueryHandler) updateLastProcessedTime(queryID int64, processe
 	if err != nil {
 		h.logger.Error().Err(err).Msg("Failed to update last processed time")
 	}
+}
+
+// validateCQQuery runs the shared SQL validator over a continuous-query
+// definition before it is stored.
+//
+// SECURITY: the CQ body is user-supplied SQL that executeAggregation later runs
+// verbatim on the shared DuckDB handle. Before this check it reached DuckDB with
+// no validation at all — no I/O-function denylist, no replacement-scan check, no
+// multi-statement rejection — so a stored CQ could read any file inside the
+// sandbox's allowlisted storage root (every tenant's Parquet) or mutate session
+// state via ATTACH/INSTALL/LOAD. The endpoint is admin-gated, but an admin token
+// is not meant to be a DuckDB shell, and the definition persists and re-executes
+// on a schedule long after the request that created it.
+// The {start_time}/{end_time} placeholders are substituted with quoted RFC3339
+// timestamps at execution (see executeAggregation), so they are replaced with
+// representative literals here — validating the raw form would leave a bare
+// `{start_time}` token in the statement and produce spurious parse-shaped input.
+func validateCQQuery(query string) error {
+	if strings.TrimSpace(query) == "" {
+		return nil // emptiness is reported by the caller's own required-field check
+	}
+	probe := strings.ReplaceAll(query, "{start_time}", "'2026-01-01T00:00:00Z'")
+	probe = strings.ReplaceAll(probe, "{end_time}", "'2026-01-01T01:00:00Z'")
+	if err := ValidateSQLRequest(probe); err != nil {
+		return fmt.Errorf("invalid query: %w", err)
+	}
+	return nil
 }

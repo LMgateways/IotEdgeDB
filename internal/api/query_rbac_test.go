@@ -315,7 +315,7 @@ func TestListMeasurements_RBAC_NoToken(t *testing.T) {
 	}
 }
 
-// TestListMeasurements_RBAC_DbFilterScoped verifies Gemini finding #2 fix:
+// TestListMeasurements_RBAC_DbFilterScoped verifies the db-filter scoping fix:
 // a user with mydb.*:read should be able to list measurements scoped to
 // mydb via ?database=mydb, even though they lack *.*:read.
 func TestListMeasurements_RBAC_DbFilterScoped(t *testing.T) {
@@ -342,7 +342,7 @@ func TestListMeasurements_RBAC_DbFilterScoped(t *testing.T) {
 	}
 }
 
-// TestEstimateQuery_RBAC_HeaderBypassFixed verifies Gemini finding #1 fix:
+// TestEstimateQuery_RBAC_HeaderBypassFixed verifies the header bypass fix:
 // when x-iedb-database header is set, the RBAC check must resolve "default"
 // table references against the header database, not literal "default".
 func TestEstimateQuery_RBAC_HeaderBypassFixed(t *testing.T) {
@@ -487,7 +487,7 @@ func TestEstimateQuery_RBAC_TableFunctionNotTreatedAsTable(t *testing.T) {
 	app := setupQueryRBACTest(t, rbac, tokenMiddleware(1, "default-only"))
 
 	// Note the whitespace before '(' — SQL allows it, and the extractor must
-	// skip it too (Gemini R7) or generate_series is misread as default.generate_series.
+	// skip it too, or generate_series is misread as default.generate_series.
 	body := strings.NewReader(`{"sql": "SELECT * FROM generate_series  (1, 10)"}`)
 	req := httptest.NewRequest("POST", "/api/v1/query/estimate", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -503,7 +503,7 @@ func TestEstimateQuery_RBAC_TableFunctionNotTreatedAsTable(t *testing.T) {
 	}
 }
 
-// TestEstimateQuery_CrossDBSyntaxRejected verifies Gemini finding #3 fix:
+// TestEstimateQuery_CrossDBSyntaxRejected verifies the cross-db rejection fix:
 // when x-iedb-database header is set, cross-database syntax (db.table) must
 // be rejected with 400, matching executeQuery behavior.
 func TestEstimateQuery_CrossDBSyntaxRejected(t *testing.T) {
@@ -530,7 +530,7 @@ func TestEstimateQuery_CrossDBSyntaxRejected(t *testing.T) {
 	}
 }
 
-// TestListMeasurements_InvalidDbFilter verifies Gemini finding #4 fix:
+// TestListMeasurements_InvalidDbFilter verifies the db-filter validation fix:
 // an invalid database query parameter should be rejected with 400 before
 // reaching the RBAC check.
 func TestListMeasurements_InvalidDbFilter(t *testing.T) {
@@ -555,7 +555,7 @@ func TestListMeasurements_InvalidDbFilter(t *testing.T) {
 	}
 }
 
-// TestHasCrossDatabaseSyntax verifies Gemini finding #3 hardening:
+// TestHasCrossDatabaseSyntax verifies the whitespace hardening:
 // the hasCrossDatabaseSyntax helper correctly handles arbitrary whitespace
 // (newlines, tabs, multiple spaces) between FROM/JOIN and the db.table ref.
 func TestHasCrossDatabaseSyntax(t *testing.T) {
@@ -570,7 +570,7 @@ func TestHasCrossDatabaseSyntax(t *testing.T) {
 		{name: "no dot = single table", sql: "SELECT * FROM cpu", expected: false},
 		{name: "no FROM", sql: "SELECT 1", expected: false},
 
-		// Gemini R3: newline / tab / multiple spaces after keyword
+		// newline / tab / multiple spaces after keyword
 		{name: "newline after FROM", sql: "SELECT * FROM\notherdb.cpu", expected: true},
 		{name: "tab after FROM", sql: "SELECT * FROM\totherdb.cpu", expected: true},
 		{name: "multiple spaces after FROM", sql: "SELECT * FROM   otherdb.cpu", expected: true},
@@ -592,12 +592,12 @@ func TestHasCrossDatabaseSyntax(t *testing.T) {
 		{name: "mixed case From", sql: "SELECT * From otherdb.cpu", expected: true},
 
 		// Non-ASCII: ToLower may change byte length, so indexing must stay on
-		// sqlLower. These must not panic (Gemini R4 medium).
+		// sqlLower. These must not panic.
 		{name: "non-ascii in literal, no cross-db", sql: "SELECT * FROM cpu WHERE name = 'café'", expected: false},
 		{name: "non-ascii before cross-db ref", sql: "SELECT 'naïve' FROM otherdb.cpu", expected: true},
 		{name: "non-ascii multibyte İ then from", sql: "SELECT 'İstanbul' FROM otherdb.cpu", expected: true},
 
-		// Gemini R5: comment / literal must not hide a cross-db ref, and a
+		// comment / literal must not hide a cross-db ref, and a
 		// db.table appearing only inside a literal must not be a false positive.
 		{name: "block comment before cross-db ref", sql: "SELECT * FROM /* sneaky */ otherdb.cpu", expected: true},
 		{name: "dash comment then newline cross-db ref", sql: "SELECT * FROM -- c\notherdb.cpu", expected: true},
@@ -619,7 +619,7 @@ func TestHasCrossDatabaseSyntax(t *testing.T) {
 	}
 }
 
-// TestEstimateQuery_CrossDBSyntaxRejected_Newline verifies Gemini R3:
+// TestEstimateQuery_CrossDBSyntaxRejected_Newline verifies the newline case:
 // cross-database syntax with newline after FROM is still rejected in the
 // estimateQuery endpoint when x-iedb-database header is set.
 func TestEstimateQuery_CrossDBSyntaxRejected_Newline(t *testing.T) {
@@ -763,7 +763,7 @@ GROUP BY a.host, b.region`
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = extractTableReferences(sql)
+		_ = extractTableReferences(sql, nil)
 	}
 }
 

@@ -272,6 +272,8 @@ func NewCoordinator(cfg *CoordinatorConfig) (*Coordinator, error) {
 			SnapshotThreshold: uint64(cfg.Config.RaftSnapshotThreshold),
 			Logger:            cfg.Logger,
 			TLSConfig:         tlsCfg,
+			SharedSecret:      cfg.Config.SharedSecret,
+			ClusterName:       cfg.Config.ClusterName,
 		}
 
 		var err error
@@ -1224,9 +1226,9 @@ func (c *Coordinator) sendJoinSuccess(conn net.Conn) {
 func (c *Coordinator) handleHeartbeat(conn net.Conn, hb *protocol.Heartbeat) {
 	// Validate shared secret if configured. A heartbeat mutates the sender's
 	// recorded liveness and self-reported state, so it is authenticated like
-	// join/leave — otherwise a network attacker could spoof any node's health
-	// (GHSA-p378-jp5r-gpgw). Mirrors handleLeaveNotify; freshness is bounded by
-	// the HMAC timestamp tolerance (consistent with join/leave, which likewise
+	// join/leave — otherwise a network attacker could spoof any node's health.
+	// Mirrors handleLeaveNotify; freshness is bounded by the HMAC timestamp
+	// tolerance (consistent with join/leave, which likewise
 	// do not nonce-replay-check).
 	if c.cfg.SharedSecret != "" {
 		if hb.AuthHMAC == "" {
@@ -1296,8 +1298,7 @@ func (c *Coordinator) handleReplicateSync(conn net.Conn, syncReq *protocol.Repli
 	remoteAddr := conn.RemoteAddr().String()
 
 	// Authentication: validate the HMAC against the cluster shared secret
-	// BEFORE accepting the connection into the replication sender. See
-	// GHSA-wfgr-8x84-22q7 / CVE-2026-48106 (audit X1).
+	// BEFORE accepting the connection into the replication sender.
 	//
 	// Refuse-when-unconfigured posture: when cluster.shared_secret is
 	// empty, replication has no legitimate authenticated caller — refuse
@@ -1310,7 +1311,6 @@ func (c *Coordinator) handleReplicateSync(conn net.Conn, syncReq *protocol.Repli
 	// from "wrong MAC" from "wrong cluster name". The specific
 	// reason is in the server log for operator debugging — see the
 	// .Msg(...) on each branch's logger.Warn().
-	//.
 	if c.cfg.SharedSecret == "" {
 		c.logger.Warn().
 			Str("peer", remoteAddr).
@@ -1400,7 +1400,7 @@ func (c *Coordinator) handleReplicateSync(conn net.Conn, syncReq *protocol.Repli
 
 	// Convert protocol types to replication types and accept the reader.
 	// Carry the handshake nonce through so the sender can derive the
-	// same HKDF session key the receiver derived (GHSA-wfgr-8x84-22q7).
+	// same HKDF session key the receiver derived.
 	replSyncReq := &replication.ReplicateSync{
 		ReaderID:          syncReq.ReaderID,
 		LastKnownSequence: syncReq.LastKnownSequence,
@@ -1625,8 +1625,7 @@ func (c *Coordinator) sendFetchError(conn net.Conn, code protocol.AckErrorCode, 
 // response on the connection and closes it. Used by handleReplicateSync
 // for every rejection path (missing/bad HMAC, self-addressed, wrong
 // cluster name, replay, shared secret unconfigured) so an attacker
-// cannot probe to distinguish rejection reasons. See
-// GHSA-wfgr-8x84-22q7 / CVE-2026-48106.
+// cannot probe to distinguish rejection reasons.
 func (c *Coordinator) sendReplicationSyncError(conn net.Conn, reason string) {
 	ack := &protocol.ReplicateSyncAck{
 		CurrentSequence: 0,
@@ -2479,10 +2478,9 @@ func (c *Coordinator) StartReplication() error {
 	if c.localNode.Role == RoleWriter || c.localNode.Role == RoleStandalone {
 		// Writer: start sender to stream entries to readers.
 		// Plumb the cluster shared secret + identity into the sender
-		// for stream authentication (GHSA-wfgr-8x84-22q7). Without
-		// SharedSecret the sender refuses every reader at AcceptReader
-		// time, matching the refuse-when-unconfigured posture of
-		// handleReplicateSync.
+		// for stream authentication. Without SharedSecret the sender
+		// refuses every reader at AcceptReader time, matching the
+		// refuse-when-unconfigured posture of handleReplicateSync.
 		c.replicationSender = replication.NewSender(&replication.SenderConfig{
 			BufferSize:   c.cfg.ReplicationBufferSize,
 			WriteTimeout: 5 * time.Second,
@@ -2575,7 +2573,7 @@ func (c *Coordinator) startReceiverWithAddr(writerAddr string) error {
 	if c.ingestBuffer != nil {
 		ingestHandler = c.buildReplicationIngestHandler()
 	}
-	// Stream-auth wiring (GHSA-wfgr-8x84-22q7): the receiver computes
+	// Stream-auth wiring: the receiver computes
 	// the handshake HMAC from SharedSecret + ClusterName + ReaderID
 	// and derives the per-connection session key for tag verification.
 	// Without SharedSecret the receiver refuses to dial.
@@ -2777,7 +2775,7 @@ func (c *Coordinator) AcceptReplicationConnection(conn net.Conn, syncReq *replic
 	//     reader before returning, so the broadcast path could
 	//     interleave bytes with the coordinator's ack write on the
 	//     same conn.
-	//   - Delivery-order race (Gemini round 4): even with writeMu
+	//   - Delivery-order race: even with writeMu
 	//     serialisation, the broadcast could acquire the lock first
 	//     and write an entry frame BEFORE the ack — receiver reads
 	//     MsgReplicateEntry as its first message, fails the handshake.

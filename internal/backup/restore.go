@@ -104,6 +104,7 @@ func (m *Manager) restoreDataFiles(ctx context.Context, backupID string, manifes
 
 	progress.TotalFiles = int64(len(files))
 	progress.TotalBytes = manifest.TotalSizeBytes
+	m.setProgress(progress)
 
 	for _, srcPath := range files {
 		select {
@@ -127,6 +128,9 @@ func (m *Manager) restoreDataFiles(ctx context.Context, backupID string, manifes
 
 		atomic.AddInt64(&progress.ProcessedFiles, 1)
 		atomic.AddInt64(&progress.ProcessedBytes, bytesWritten)
+		// Republish so /status polling sees live counters — published Progress
+		// values are immutable snapshots, not the struct being mutated here.
+		m.setProgress(progress)
 
 		if atomic.LoadInt64(&progress.ProcessedFiles)%100 == 0 {
 			m.logger.Info().
@@ -177,16 +181,25 @@ func (m *Manager) streamRestoreFile(ctx context.Context, srcPath, destPath strin
 // restoreSQLite restores the SQLite database from the backup.
 // It creates a .before-restore backup of the current database first.
 func (m *Manager) restoreSQLite(ctx context.Context, backupID string) error {
-	srcPath := fmt.Sprintf("%s/metadata/iedb.db", backupID)
+	if err := m.restoreSQLiteFile(ctx, backupID, "iedb.db", m.sqliteDBPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+// restoreSQLiteFile restores one SQLite database from metadata/<srcName> in the
+// backup to destPath, preserving the previous file as .before-restore.
+func (m *Manager) restoreSQLiteFile(ctx context.Context, backupID, srcName, destPath string) error {
+	srcPath := fmt.Sprintf("%s/metadata/%s", backupID, srcName)
 	data, err := m.backupStorage.Read(ctx, srcPath)
 	if err != nil {
 		return fmt.Errorf("failed to read SQLite backup: %w", err)
 	}
 
 	// Safety: backup the current database before overwriting
-	if _, statErr := os.Stat(m.sqliteDBPath); statErr == nil {
-		preRestorePath := m.sqliteDBPath + ".before-restore"
-		currentData, err := os.ReadFile(m.sqliteDBPath)
+	if _, statErr := os.Stat(destPath); statErr == nil {
+		preRestorePath := destPath + ".before-restore"
+		currentData, err := os.ReadFile(destPath)
 		if err == nil {
 			if err := os.WriteFile(preRestorePath, currentData, 0600); err != nil {
 				m.logger.Warn().Err(err).Msg("Failed to create pre-restore backup of SQLite database")
@@ -196,11 +209,11 @@ func (m *Manager) restoreSQLite(ctx context.Context, backupID string) error {
 		}
 	}
 
-	if err := os.WriteFile(m.sqliteDBPath, data, 0600); err != nil {
+	if err := os.WriteFile(destPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write SQLite database: %w", err)
 	}
 
-	m.logger.Info().Str("backup_id", backupID).Msg("SQLite database restored")
+	m.logger.Info().Str("backup_id", backupID).Str("database", srcName).Msg("SQLite database restored")
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iedb/internal/auth"
+	"iedb/internal/database"
 	"net"
 	"os"
 	"os/signal"
@@ -43,6 +44,21 @@ type Server struct {
 	// so the LB drains this node before Stop() actually closes the
 	// listener. See docs/progress/2026-05-26-multi-writer-pattern2.md.
 	ready atomic.Bool
+	// storageStatus supplies the /health "storage" payload: per-tier
+	// backend + credential state from the DuckDB credential refresher
+	// machinery. Wired by main.go after database.New; nil until then (the
+	// listener only opens after wiring, but the guard keeps tests and future
+	// reorderings safe). In-memory reads only — /health never probes S3.
+	storageStatus func() map[string]database.StorageTierStatus
+
+	// storageCredsFailReady: when true (server.storage_credentials_fail_ready,
+	// default false), /ready returns 503 while any tier's credential state is
+	// "expired". Applied AND-ed after the ready flag — it can only remove
+	// readiness, never grant it, so WAL-recovery gating and shutdown drain are
+	// untouched. Only "expired" fails ready: "fallback"/"unknown"/"degraded"
+	// deployments may be healthy or permanently credential-less by design and
+	// must not flap the LB.
+	storageCredsFailReady bool
 }
 
 // ServerConfig holds server configuration
@@ -145,7 +161,6 @@ func NewServer(config *ServerConfig, logger zerolog.Logger) *Server {
 	// network-reachable caller (auth middleware short-circuited it via
 	// PublicPrefixes). See cmd/iedb/main.go for the opt-in localhost-bound
 	// pprof listener started only when IEDB_DEBUG_PPROF=1.
-	// Closes audit finding #2 from 2026-05-19 (GHSA-j93g-rp6m-j32m).
 
 	// Request logging middleware
 	app.Use(requestLogger(logger))
@@ -185,7 +200,7 @@ func (s *Server) RegisterRoutes() {
 	// it among these public base routes (before the global auth middleware is
 	// installed) left it reachable unauthenticated, because Fiber matches
 	// routes in registration order and returns before reaching a later
-	// app.Use middleware (GHSA-m3qr-fvp4-78xj). It is now registered via
+	// app.Use middleware. It is now registered via
 	// RegisterLogsRoute() AFTER the auth middleware, from cmd/iedb/main.go.
 
 	// API v1 routes will be added here
@@ -204,15 +219,44 @@ func (s *Server) RegisterLogsRoute(authManager *auth.AuthManager) {
 	s.app.Get("/api/v1/logs", withAdminAuth(authManager), s.logsHandler)
 }
 
-// healthHandler returns server health status
+// SetStorageStatus wires the per-tier storage credential status source
+// (database.DuckDB.StorageCredentialStatus) into /health and, when
+// server.storage_credentials_fail_ready is set, /ready. failReady gates the
+// readiness behavior.
+func (s *Server) SetStorageStatus(fn func() map[string]database.StorageTierStatus, failReady bool) {
+	s.storageStatus = fn
+	s.storageCredsFailReady = failReady
+}
+
+// healthHandler returns server health status.
+//
+// The "storage" field is served UNAUTHENTICATED by design, like the rest of
+// /health and like /metrics (see the PublicRoutes rationale in main.go): it
+// contains no bucket/container names, endpoints, prefixes, paths, or key
+// material — only tier names, backend types, credential modes, sanitized
+// provider labels, expiry timestamps and error counts. That is what probes
+// and Prometheus need, and they do not authenticate. Field-incident context:
+// a reader served green /health for ~21h while every S3 query failed on
+// expired credentials.
+//
+// "status" stays "ok" regardless of credential state: /health is LIVENESS.
+// Killing a pod over expired credentials would loop it through restarts that
+// mask the problem; traffic routing on credential state is /ready's job
+// (opt-in knob).
 func (s *Server) healthHandler(c *fiber.Ctx) error {
 	uptime := time.Since(startTime)
-	return c.JSON(fiber.Map{
+	payload := fiber.Map{
 		"status":     "ok",
 		"time":       time.Now().UTC().Format(time.RFC3339),
 		"uptime":     uptime.String(),
 		"uptime_sec": uptime.Seconds(),
-	})
+	}
+	if s.storageStatus != nil {
+		if st := s.storageStatus(); len(st) > 0 {
+			payload["storage"] = st
+		}
+	}
+	return c.JSON(payload)
 }
 
 // readyHandler returns server readiness status for load-balancer health
@@ -243,6 +287,24 @@ func (s *Server) readyHandler(c *fiber.Ctx) error {
 			"time":   time.Now().UTC().Format(time.RFC3339),
 			"reason": "server is starting up or shutting down; load balancer should not route traffic here",
 		})
+	}
+	// Opt-in: drain this node while storage credentials are expired.
+	// Checked after the ready flag — this can only remove readiness. Only
+	// "expired" qualifies; see SetStorageStatus.
+	if s.storageCredsFailReady && s.storageStatus != nil {
+		st := s.storageStatus()
+		// Deterministic order so incident logs are stable when both tiers are
+		// expired.
+		for _, tier := range []string{"hot", "cold"} {
+			if ts, ok := st[tier]; ok && ts.State == database.CredStateExpired {
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+					"status": "not_ready",
+					"time":   time.Now().UTC().Format(time.RFC3339),
+					"reason": "storage_credentials_expired",
+					"tier":   tier,
+				})
+			}
+		}
 	}
 	uptime := time.Since(startTime).Seconds()
 

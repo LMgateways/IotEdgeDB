@@ -65,6 +65,11 @@ type Candidate struct {
 	FileCount     int
 	Tier          string
 	PartitionTime time.Time
+	// SyncExempt marks a candidate produced by the hub's spoke-namespace
+	// expander: its files are RECEIVED data this node holds as a hub,
+	// which the edge-sync delivery gate must not defer (they are never owed
+	// upstream). False for every candidate a tier discovers itself.
+	SyncExempt bool
 	// BatchNumber and TotalBatches are 1-based and always set by
 	// SplitCandidateIntoBatches, including for a partition that fits in a
 	// single batch (1 of 1). Job and output-file identifiers incorporate
@@ -140,8 +145,12 @@ func SplitCandidateIntoBatches(c Candidate, maxFilesPerBatch int) []Candidate {
 			FileCount:     end - start,
 			Tier:          c.Tier,
 			PartitionTime: c.PartitionTime,
-			BatchNumber:   i + 1,
-			TotalBatches:  numBatches,
+			// Selective constructor: SyncExempt must ride along, or batch
+			// 2+ of a spoke-namespace partition would hit the delivery gate
+			// the whole candidate was exempted from.
+			SyncExempt:   c.SyncExempt,
+			BatchNumber:  i + 1,
+			TotalBatches: numBatches,
 		}
 		batches = append(batches, batch)
 	}
@@ -169,6 +178,11 @@ type Tier interface {
 	// IsEnabled returns whether this tier is enabled
 	IsEnabled() bool
 
+	// GetMinFiles returns the tier's minimum-file threshold. The sync
+	// eligibility filter re-applies it after removing undelivered files
+	// from a candidate — a single manager-wide value would be wrong
+	// (hourly defaults to 10, daily to 12).
+	GetMinFiles() int
 	// GetStats returns tier statistics
 	GetStats() map[string]interface{}
 }

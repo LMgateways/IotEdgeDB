@@ -30,6 +30,13 @@ const (
 	MsgTypeJoin      MsgType = "join"
 	MsgTypeLeave     MsgType = "leave"
 	MsgTypeHeartbeat MsgType = "heartbeat"
+	// Raft transport connection-handshake labels. The
+	// two directions carry distinct labels so a response captured in one
+	// direction cannot be replayed as the other: the server proves the secret
+	// with MsgTypeRaftAuthResp over the client's nonce, the client with
+	// MsgTypeRaftAuth over the server's nonce.
+	MsgTypeRaftAuth     MsgType = "raft-auth"
+	MsgTypeRaftAuthResp MsgType = "raft-auth-resp"
 )
 
 // ComputeHMAC computes HMAC-SHA256 over the parameters of a coordinator
@@ -237,8 +244,6 @@ func ValidateCacheInvalidateHMAC(sharedSecret, nonce, nodeID, clusterName string
 // Replication protocol HMAC + session key derivation
 // ----------------------------------------------------------------------
 //
-// Closes GHSA-wfgr-8x84-22q7 / CVE-2026-48106 (audit X1, 2026-05-19).
-//
 // The replication protocol has three trust boundaries:
 //
 //   1. Handshake (MsgReplicateSync): reader announces itself to the
@@ -348,9 +353,8 @@ const ReplicationEntryTagLen = 8
 // replicate-sync, replicate-checkpoint) AND the NonceCache TTL the
 // coordinator constructs at startup — keep them aligned so a replayed
 // HMAC can never outlive its nonce-cache slot. Centralized here so a
-// future operator can tune all sites in one place; Gemini round 1 on
-// the hardcoded 5*time.Minute scattered across
-// coordinator.go.
+// future operator can tune all sites in one place instead of the
+// hardcoded 5*time.Minute scattered across coordinator.go.
 const HMACTimestampTolerance = 5 * time.Minute
 
 // ComputeReplicationEntryTag returns the 8-byte per-entry MAC tag

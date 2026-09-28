@@ -11,6 +11,16 @@ import (
 type StringMask struct {
 	Placeholder string
 	Original    string
+	// Identifier marks a double-quoted token. In DuckDB SQL `"…"` is an
+	// IDENTIFIER, never a string — masking it identically to '…' literals is
+	// what made quoted database/measurement names resolve to quote-polluted
+	// storage paths (the quotes were spliced back inside the read_parquet
+	// glob at unmask time). Identifier masks get a distinct placeholder class
+	// so the table-reference rewriter can resolve them to their unquoted
+	// names, while every other masking consumer (comment stripping,
+	// validateSQL, the FROM-in-function-body scanner, the partition pruner)
+	// still sees an inert placeholder.
+	Identifier bool
 }
 
 // MaskStringLiterals replaces string literals with placeholders to prevent regex from matching inside them.
@@ -31,10 +41,71 @@ func MaskStringLiterals(sql string, hasQuotes bool) (string, []StringMask) {
 
 	i := 0
 	maskIndex := 0
+	// Identical quoted identifiers share ONE placeholder. The CTE-name
+	// registry and the table rewriter compare captured names textually, so
+	// `WITH "x-y" AS (…) SELECT * FROM "x-y"` must present the same token at
+	// both sites — per-occurrence placeholders would make the FROM site miss
+	// the CTE and rewrite it to a nonexistent storage path.
+	// Allocated lazily: the common single-quote-only query on this hot path
+	// never carries a double-quoted identifier.
+	var identPlaceholders map[string]string
 
 	for i < len(sql) {
 		ch := sql[i]
 
+		// SECURITY: dollar-quoted strings ($tag$…$tag$). DuckDB accepts these
+		// wherever a single-quoted literal is legal — including table position,
+		// where the string triggers a replacement scan that reads the file
+		// directly. Because the form carries NO quote character at all, an
+		// unmasked $$…$$ payload also slips past every quote-parity check.
+		// Left unmasked, `FROM $$/other-tenant/d.parquet$$` reached DuckDB and
+		// returned cross-tenant rows (verified on DuckDB 1.4.3). Masked here
+		// so the table-position and denylist scanners see an inert placeholder,
+		// exactly as they do for '…'.
+		if ch == '$' {
+			if tag, ok := dollarQuoteTag(sql, i); ok {
+				closing := "$" + tag + "$"
+				end := strings.Index(sql[i+len(closing):], closing)
+				if end >= 0 {
+					stop := i + len(closing) + end + len(closing)
+					original := sql[i:stop]
+					placeholder := fmt.Sprintf("__STR_%d__", maskIndex)
+					maskIndex++
+					masks = append(masks, StringMask{Placeholder: placeholder, Original: original})
+					result.WriteString(placeholder)
+					i = stop
+					continue
+				}
+				// Unterminated dollar quote: mask the remainder so no scanner
+				// treats the trailing content as executable SQL.
+				original := sql[i:]
+				placeholder := fmt.Sprintf("__STR_%d__", maskIndex)
+				maskIndex++
+				masks = append(masks, StringMask{Placeholder: placeholder, Original: original})
+				result.WriteString(placeholder)
+				i = len(sql)
+				continue
+			}
+		}
+
+		// SECURITY: escape-string literals (E'…' / e'…'). DuckDB treats the
+		// E prefix as part of the literal, so `FROM e'/other/d.parquet'` is the
+		// same replacement scan as the bare-quoted form. Masking the quoted body
+		// alone would leave a stray `e` bareword sitting in table position, which
+		// reads as a plain identifier and hides the replacement scan from
+		// stringLiteralInTablePosition. Consume the prefix WITH the literal so the
+		// whole construct collapses to one placeholder.
+		if (ch == 'e' || ch == 'E') && i+1 < len(sql) && sql[i+1] == '\'' && !isIdentifierByte(prevByte(sql, i)) {
+			start := i
+			i++ // move onto the opening quote
+			i = scanQuoted(sql, i, '\'')
+			original := sql[start:i]
+			placeholder := fmt.Sprintf("__STR_%d__", maskIndex)
+			maskIndex++
+			masks = append(masks, StringMask{Placeholder: placeholder, Original: original})
+			result.WriteString(placeholder)
+			continue
+		}
 		// Check for string literal start (single or double quote)
 		if ch == '\'' || ch == '"' {
 			quote := ch
@@ -64,12 +135,28 @@ func MaskStringLiterals(sql string, hasQuotes bool) (string, []StringMask) {
 				i++
 			}
 
-			// Extract the full string literal and create a placeholder
+			// Extract the full quoted token and create a placeholder.
 			original := sql[start:i]
-			placeholder := fmt.Sprintf("__STR_%d__", maskIndex)
-			masks = append(masks, StringMask{Placeholder: placeholder, Original: original})
-			result.WriteString(placeholder)
-			maskIndex++
+			if quote == '"' {
+				// Identifier class: deduplicated, distinct prefix (see the
+				// StringMask.Identifier comment).
+				placeholder, seen := identPlaceholders[original]
+				if !seen {
+					if identPlaceholders == nil {
+						identPlaceholders = make(map[string]string)
+					}
+					placeholder = fmt.Sprintf("__IDENT_%d__", maskIndex)
+					identPlaceholders[original] = placeholder
+					masks = append(masks, StringMask{Placeholder: placeholder, Original: original, Identifier: true})
+					maskIndex++
+				}
+				result.WriteString(placeholder)
+			} else {
+				placeholder := fmt.Sprintf("__STR_%d__", maskIndex)
+				masks = append(masks, StringMask{Placeholder: placeholder, Original: original})
+				result.WriteString(placeholder)
+				maskIndex++
+			}
 		} else {
 			result.WriteByte(ch)
 			i++
@@ -83,15 +170,49 @@ func MaskStringLiterals(sql string, hasQuotes bool) (string, []StringMask) {
 func UnmaskStringLiterals(sql string, masks []StringMask) string {
 	result := sql
 	for _, mask := range masks {
+		if mask.Identifier {
+			// Identifier placeholders are deduplicated at mask time, so one
+			// mask entry may stand for several occurrences.
+			result = strings.ReplaceAll(result, mask.Placeholder, mask.Original)
+			continue
+		}
 		result = strings.Replace(result, mask.Placeholder, mask.Original, 1)
 	}
 	return result
 }
 
+// IdentifierNames maps each identifier placeholder to its UNQUOTED name:
+// surrounding double quotes stripped and the `""` escape collapsed. This is
+// what the table-reference rewriter and the RBAC extractor resolve captured
+// placeholders through, so both see the same clean name — the
+// extraction-must-match-execution invariant.
+func IdentifierNames(masks []StringMask) map[string]string {
+	var out map[string]string
+	for _, mask := range masks {
+		if !mask.Identifier {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		name := mask.Original
+		if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+			name = name[1 : len(name)-1]
+		}
+		out[mask.Placeholder] = strings.ReplaceAll(name, `""`, `"`)
+	}
+	return out
+}
+
 // HasQuotes returns true if the SQL string contains any quote characters.
 // This is a fast check to avoid unnecessary processing in MaskStringLiterals.
+// `$` counts as a quote character here: a dollar-quoted string ($tag$…$tag$)
+// carries no ' or " at all, so gating masking on those alone let the whole
+// construct through unmasked. The masker still verifies
+// the `$` actually opens a valid dollar quote, so a stray `$` only costs one
+// scan pass, never a false mask.
 func HasQuotes(sql string) bool {
-	return strings.ContainsAny(sql, "'\"")
+	return strings.ContainsAny(sql, "'\"$")
 }
 
 // fromKeywordFunctions lists SQL builtins whose argument list contains a bare
@@ -220,11 +341,10 @@ func MaskFromKeywordsInFunctionBodies(sql string) (string, []FromMask) {
 		return sql, nil
 	}
 	// Cheap pre-check skips the scanner allocation when no trigger
-	// function call is present. Round-2 reviewers asked if the
-	// pre-check is redundant; it is NOT — without it we'd build a
-	// strings.Builder and walk the entire SQL byte-by-byte for every
-	// uncached query, even the 99% that have no EXTRACT/SUBSTRING/
-	// TRIM/OVERLAY. The miss path is 0 allocs.
+	// function call is present. This pre-check is NOT redundant —
+	// without it we'd build a strings.Builder and walk the entire SQL
+	// byte-by-byte for every uncached query, even the 99% that have no
+	// EXTRACT/SUBSTRING/TRIM/OVERLAY. The miss path is 0 allocs.
 	if !ContainsFromKeywordFunction(sql) {
 		return sql, nil
 	}
@@ -271,7 +391,7 @@ func MaskFromKeywordsInFunctionBodies(sql string) (string, []FromMask) {
 			// subquery's `FROM cpu` must be left alone so the regex
 			// rewriter can convert `cpu` to read_parquet(...). Without
 			// the depth-equality check, DuckDB fails with "Table cpu
-			// does not exist". (gemini-code-assist round 2.)
+			// does not exist".
 			if len(stack) > 0 && depth == stack[len(stack)-1] && (c == 'f' || c == 'F') && isFromKeywordAt(sql, i) {
 				ph := strconv.AppendInt(append(phBuf[:0], "__FROM_MASK_"...), int64(maskIndex), 10)
 				ph = append(ph, '_', '_')
@@ -295,8 +415,7 @@ func MaskFromKeywordsInFunctionBodies(sql string) (string, []FromMask) {
 // placeholders are unique strings, restored by string replace.
 //
 // Uses strings.NewReplacer for a single-pass walk over sql; the old
-// loop-of-Replace allocated one intermediate string per mask
-// (gemini-code-assist round 2).
+// loop-of-Replace allocated one intermediate string per mask.
 func UnmaskFromKeywordsInFunctionBodies(sql string, masks []FromMask) string {
 	if len(masks) == 0 {
 		return sql
@@ -317,8 +436,7 @@ func UnmaskFromKeywordsInFunctionBodies(sql string, masks []FromMask) string {
 //
 // Rejects quoted identifiers — `"EXTRACT"(...)` or “ `EXTRACT`(...) “ is
 // a user column, not the builtin. DuckDB does not accept backticks for
-// identifiers in its default parser, but the check costs nothing and
-// matches gemini-code-assist's defensive guidance.
+// identifiers in its default parser, but the check costs nothing.
 //
 // Allocation-free: compares the byte range against fromKeywordFunctions
 // in place via equalFoldASCII.
@@ -471,4 +589,75 @@ func equalFoldASCII(a, b string) bool {
 // buildReadParquetExpr for the call sites.
 func EscapeStringLiteral(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+// dollarQuoteTag reports whether a dollar-quote opener starts at sql[i] and, if
+// so, returns its tag (empty for the anonymous `$$` form).
+//
+// DuckDB/Postgres dollar quoting is `$tag$body$tag$`, where tag is empty or a
+// valid identifier that must not start with a digit. Bounding the tag this way
+// keeps `a$1` (a legal identifier) and `$1` (a positional parameter) from being
+// misread as string openers — misreading either would swallow the rest of the
+// query into a placeholder and hide real SQL from every scanner.
+func dollarQuoteTag(sql string, i int) (string, bool) {
+	if i >= len(sql) || sql[i] != '$' {
+		return "", false
+	}
+	// A `$` immediately following an identifier character is part of that
+	// identifier (or a positional parameter), not a quote opener.
+	if isIdentifierByte(prevByte(sql, i)) {
+		return "", false
+	}
+	j := i + 1
+	for j < len(sql) && sql[j] != '$' {
+		c := sql[j]
+		isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+		isDigit := c >= '0' && c <= '9'
+		if !isAlpha && !(isDigit && j > i+1) {
+			return "", false
+		}
+		j++
+	}
+	if j >= len(sql) {
+		return "", false
+	}
+	return sql[i+1 : j], true
+}
+
+// scanQuoted returns the index just past the literal whose opening quote sits at
+// sql[i], handling doubled (”) and backslash escapes. If the literal is
+// unterminated it returns len(sql).
+func scanQuoted(sql string, i int, quote byte) int {
+	i++ // move past the opening quote
+	for i < len(sql) {
+		if sql[i] == quote {
+			if i+1 < len(sql) && sql[i+1] == quote {
+				i += 2
+				continue
+			}
+			if i > 0 && sql[i-1] == '\\' {
+				i++
+				continue
+			}
+			return i + 1
+		}
+		i++
+	}
+	return len(sql)
+}
+
+// isIdentifierByte reports whether c can appear inside an unquoted SQL identifier.
+func isIdentifierByte(c byte) bool {
+	return c == '_' ||
+		(c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9')
+}
+
+// prevByte returns the byte before index i, or 0 at the start of the string.
+func prevByte(s string, i int) byte {
+	if i == 0 {
+		return 0
+	}
+	return s[i-1]
 }

@@ -17,6 +17,19 @@ type MessagePackDecoder struct {
 	logger       zerolog.Logger
 	totalDecoded atomic.Uint64
 	totalErrors  atomic.Uint64
+	// typedEnabled turns on the typed columnar fast path (see
+	// tryDecodeColumnarTyped). Off by default; the msgpack handler enables
+	// it when no decimal columns are configured (decimal-configured
+	// deployments keep the generic path's exact semantics).
+	typedEnabled bool
+	typedHits    atomic.Uint64
+	typedMisses  atomic.Uint64
+}
+
+// SetTypedDecodeEnabled toggles the typed columnar fast path. Not
+// concurrency-safe with in-flight Decode calls — set once at wiring time.
+func (d *MessagePackDecoder) SetTypedDecodeEnabled(enabled bool) {
+	d.typedEnabled = enabled
 }
 
 // NewMessagePackDecoder creates a new MessagePack decoder
@@ -36,6 +49,19 @@ func (d *MessagePackDecoder) Decode(data []byte) (interface{}, error) {
 	// with zero benefit. Per-field sanitization handles the extracted strings.
 	// (Bulk pre-validation is used in the Line Protocol path where payloads ARE UTF-8.)
 
+	// TYPED FAST PATH: decode a top-level single-map columnar payload straight
+	// into typed column slices, skipping the per-value interface boxing below
+	// (~12% of write CPU at sustained 26M rec/s). Falls through to the generic
+	// path on any shape it doesn't handle — the generic path remains the
+	// authority on accept/reject behavior.
+	if d.typedEnabled {
+		if rec, ok := d.tryDecodeColumnarTyped(data); ok {
+			d.typedHits.Add(1)
+			d.totalDecoded.Add(1)
+			return []interface{}{rec}, nil
+		}
+		d.typedMisses.Add(1)
+	}
 	// IMPORTANT: Decode to generic interface{} first to handle both map and array formats
 	// Telegraf and other clients may send data in array-encoded format which would fail
 	// if we try to decode directly into a struct
@@ -434,6 +460,15 @@ func (d *MessagePackDecoder) extractCompactFields(f interface{}) map[string]inte
 // Modifies values in-place to avoid allocating a new []interface{} slice
 // This reduces GC pressure significantly under high load (6M+ RPS)
 func (d *MessagePackDecoder) normalizeTimestamps(columns map[string][]interface{}) error {
+	return normalizeTimestampColumns(columns)
+}
+
+// normalizeTimestampColumns is the package-level implementation, shared with
+// the WAL-replay/replication path (WriteColumnarDirectNoWAL): raw WAL
+// payloads are original client bytes that never went through the live decode
+// path, so replay must apply identical normalization. Idempotent for values
+// already in microseconds (multiplier 1).
+func normalizeTimestampColumns(columns map[string][]interface{}) error {
 	timeCol, exists := columns["time"]
 	if !exists || len(timeCol) == 0 {
 		return nil
@@ -542,6 +577,12 @@ func toInt64Timestamp(v interface{}) (int64, bool) {
 // This prevents DuckDB query failures caused by non-UTF-8 data in Parquet files.
 // Returns count of sanitized fields for logging.
 func (d *MessagePackDecoder) sanitizeStringColumns(columns map[string][]interface{}) int {
+	return sanitizeColumnarStrings(columns)
+}
+
+// sanitizeColumnarStrings is the package-level implementation, shared with
+// the WAL-replay/replication path.
+func sanitizeColumnarStrings(columns map[string][]interface{}) int {
 	sanitizedCount := 0
 	for _, colData := range columns {
 		for i, val := range colData {
@@ -585,8 +626,10 @@ func (d *MessagePackDecoder) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_decoded": decoded,
-		"total_errors":  errors,
-		"error_rate":    errorRate,
+		"total_decoded":       decoded,
+		"total_errors":        errors,
+		"error_rate":          errorRate,
+		"typed_decode_hits":   d.typedHits.Load(),
+		"typed_decode_misses": d.typedMisses.Load(),
 	}
 }

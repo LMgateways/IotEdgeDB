@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"iedb/internal/metrics"
+	sqlutil "iedb/internal/sql"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -61,7 +62,27 @@ func (h *QueryHandler) executeQueryArrow(c *fiber.Ctx) error {
 			"error":   err.Error(),
 		})
 	}
-
+	// Opt-in stream encodings. Both change the bytes the client must be able
+	// to parse, so they are strictly request-driven — no config default:
+	//   x-iedb-arrow-dictionary: true  → dictionary-encode low-cardinality
+	//     string columns (schema becomes dictionary<int32, utf8> for them)
+	//   x-iedb-arrow-compression: zstd|lz4 → Arrow IPC buffer compression
+	dictEnabled := isTruthyHeader(c.Get("x-iedb-arrow-dictionary"))
+	// strings.Clone is REQUIRED: c.Get aliases the fasthttp header buffer,
+	// and ToLower/TrimSpace return the ORIGINAL string when unchanged (e.g.
+	// "zstd"). ipcCompression is captured by the SetBodyStreamWriter closure
+	// and read after the handler returns — same aliasing class as the
+	// x-iedb-database wrong-DB corruption bug.
+	ipcCompression := strings.Clone(strings.ToLower(strings.TrimSpace(c.Get("x-iedb-arrow-compression"))))
+	switch ipcCompression {
+	case "", "zstd", "lz4":
+	default:
+		m.IncQueryErrors()
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "invalid x-iedb-arrow-compression: must be zstd or lz4",
+		})
+	}
 	// Extract x-iedb-database header for optimized query path
 	headerDB := c.Get("x-iedb-database")
 	if err := validateHeaderDatabase(headerDB); err != nil {
@@ -142,8 +163,8 @@ func (h *QueryHandler) executeQueryArrow(c *fiber.Ctx) error {
 	convertedSQL, _ := h.getTransformedSQL(c.Context(), req.SQL, headerDB)
 
 	h.logger.Debug().
-		Str("original_sql", req.SQL).
-		Str("converted_sql", convertedSQL).
+		Str("original_sql", sqlutil.ForLog(req.SQL)).
+		Str("converted_sql", sqlutil.ForLog(convertedSQL)).
 		Str("header_db", headerDB).
 		Msg("Executing Arrow query")
 
@@ -167,14 +188,14 @@ func (h *QueryHandler) executeQueryArrow(c *fiber.Ctx) error {
 		}
 		if h.queryTimeout > 0 && ctx.Err() == context.DeadlineExceeded {
 			m.IncQueryTimeouts()
-			h.logger.Error().Err(err).Str("sql", req.SQL).Dur("timeout", h.queryTimeout).Msg("Arrow query timed out")
+			h.logger.Error().Err(err).Str("sql", sqlutil.ForLog(req.SQL)).Dur("timeout", h.queryTimeout).Msg("Arrow query timed out")
 			return c.Status(fiber.StatusGatewayTimeout).JSON(fiber.Map{
 				"success": false,
 				"error":   "Query timed out",
 			})
 		}
 		m.IncQueryErrors()
-		h.logger.Error().Err(err).Str("sql", req.SQL).Msg("Arrow query execution failed")
+		h.logger.Error().Err(err).Str("sql", sqlutil.ForLog(req.SQL)).Msg("Arrow query execution failed")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   err.Error(),
@@ -216,7 +237,38 @@ func (h *QueryHandler) executeQueryArrow(c *fiber.Ctx) error {
 	}
 	streamCtx := ctx
 	fctx.SetBodyStreamWriter(func(w *bufio.Writer) {
-		ipcWriter := ipc.NewWriter(w, ipc.WithSchema(schema))
+		// This closure runs on a bare fasthttp goroutine: an unrecovered
+		// panic here kills the whole process (fiber's recover middleware
+		// only wraps the handler, which has already returned). Convert
+		// panics to a logged error; the connection dies mid-stream, which
+		// the client sees as a truncated Arrow stream.
+		defer func() {
+			if r := recover(); r != nil {
+				m.IncQueryErrors()
+				h.logger.Error().Interface("panic", r).
+					Msg("Arrow IPC stream writer panicked; stream truncated")
+			}
+		}()
+		// The IPC writer is created lazily on the first batch: when
+		// dictionary encoding is requested, the output schema depends on a
+		// cardinality analysis of that batch (see newArrowDictTransformer).
+		var ipcWriter *ipc.Writer
+		var dictXform *arrowDictTransformer
+		// Dictionary columns use REPLACEMENT dictionaries (arrow-go's
+		// default): the writer skips re-sending an unchanged dictionary and
+		// re-sends the full dictionary when it grows. Deliberately NOT
+		// WithDictionaryDeltas — polars cannot read delta batches (verified
+		// against polars 1.43; pyarrow reads both).
+		newIPCWriter := func(outSchema *arrow.Schema) *ipc.Writer {
+			opts := []ipc.Option{ipc.WithSchema(outSchema)}
+			switch ipcCompression {
+			case "zstd":
+				opts = append(opts, ipc.WithZstd())
+			case "lz4":
+				opts = append(opts, ipc.WithLZ4())
+			}
+			return ipc.NewWriter(w, opts...)
+		}
 
 		var totalRows int64
 		var streamErr error
@@ -224,9 +276,8 @@ func (h *QueryHandler) executeQueryArrow(c *fiber.Ctx) error {
 		for reader.Next() {
 			// Per-batch ctx check: a timeout firing or client disconnect
 			// must short-circuit instead of draining DuckDB into a
-			// buffer the client is no longer reading. See review/
-			// query-path-criticals C5. Non-blocking select with labeled
-			// break is the idiomatic Go cancellation pattern (gemini r1).
+			// buffer the client is no longer reading. Non-blocking select
+			// with labeled break is the idiomatic Go cancellation pattern.
 			select {
 			case <-streamCtx.Done():
 				streamErr = fmt.Errorf("stream cancelled at row %d: %w", totalRows, streamCtx.Err())
@@ -259,7 +310,40 @@ func (h *QueryHandler) executeQueryArrow(c *fiber.Ctx) error {
 				batch = castedBatch
 			}
 
-			err := ipcWriter.Write(batch)
+			// First batch: decide dictionary columns (if requested) and
+			// create the writer with the final output schema.
+			if ipcWriter == nil {
+				outSchema := schema
+				if dictEnabled {
+					// Analysis runs on the (possibly decimal-casted) batch so
+					// the transformer's schema matches what it will receive.
+					dictXform = newArrowDictTransformer(batch, &h.logger)
+					if dictXform != nil {
+						outSchema = dictXform.schema
+					}
+				}
+				ipcWriter = newIPCWriter(outSchema)
+			}
+
+			writeBatch := batch
+			var encodedBatch arrow.Record
+			if dictXform != nil {
+				var encErr error
+				encodedBatch, encErr = dictXform.transform(batch)
+				if encErr != nil {
+					if castedBatch != nil {
+						castedBatch.Release()
+					}
+					streamErr = fmt.Errorf("failed to dictionary-encode batch at row %d: %w", totalRows, encErr)
+					break streamLoop
+				}
+				writeBatch = encodedBatch
+			}
+
+			err := ipcWriter.Write(writeBatch)
+			if encodedBatch != nil {
+				encodedBatch.Release()
+			}
 			if castedBatch != nil {
 				castedBatch.Release()
 			}
@@ -284,6 +368,15 @@ func (h *QueryHandler) executeQueryArrow(c *fiber.Ctx) error {
 			}
 		}
 
+		// Zero-batch result: no writer was created in the loop. Emit an
+		// empty stream with the base schema so clients still get a valid
+		// Arrow IPC response.
+		if ipcWriter == nil {
+			ipcWriter = newIPCWriter(schema)
+		}
+		if dictXform != nil {
+			defer dictXform.release()
+		}
 		if err := ipcWriter.Close(); err != nil {
 			// Warn (not Error): when the loop broke because the client
 			// disconnected, ipcWriter.Close is guaranteed to fail flushing
@@ -352,7 +445,12 @@ type decimalCastInfo struct {
 func normalizeDecimalSchema(schema *arrow.Schema) *decimalCastInfo {
 	hasDecimal := false
 	for i := 0; i < schema.NumFields(); i++ {
-		if _, ok := schema.Field(i).Type.(*arrow.Decimal128Type); ok {
+		// Match the arrow.DecimalType interface, not *arrow.Decimal128Type:
+		// arrow-go also has Decimal32/64/256, and a decimal that slips
+		// through here is neither normalized nor encodable (the msgpack
+		// encoder has no decimal case), so it would go out as a string
+		// under a numeric-looking type name.
+		if _, ok := schema.Field(i).Type.(arrow.DecimalType); ok {
 			hasDecimal = true
 			break
 		}
@@ -365,8 +463,8 @@ func normalizeDecimalSchema(schema *arrow.Schema) *decimalCastInfo {
 	fields := make([]arrow.Field, schema.NumFields())
 	for i := 0; i < schema.NumFields(); i++ {
 		f := schema.Field(i)
-		if dt, ok := f.Type.(*arrow.Decimal128Type); ok {
-			if dt.Scale == 0 {
+		if dt, ok := f.Type.(arrow.DecimalType); ok {
+			if dt.GetScale() == 0 {
 				targets[i] = arrow.PrimitiveTypes.Int64
 			} else {
 				targets[i] = arrow.PrimitiveTypes.Float64

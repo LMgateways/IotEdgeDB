@@ -193,14 +193,18 @@ func (c *schemaLRUCache) evictLRU() {
 
 // ArrowWriter handles Arrow schema inference and Parquet writing
 type ArrowWriter struct {
-	compression     compress.Compression
-	useDictionary   bool
-	writeStatistics bool
-	dataPageVersion string
+	compression       compress.Compression
+	useDictionary     bool
+	numericDictionary bool
+	writeStatistics   bool
+	dataPageVersion   string
 
 	// Pre-built Parquet writer properties (immutable after construction)
 	writerProps *parquet.WriterProperties
-	arrowProps  pqarrow.ArrowWriterProperties
+	// baseWriterOpts are the schema-independent options writerPropsFor
+	// extends with per-column dictionary overrides.
+	baseWriterOpts []parquet.WriterProperty
+	arrowProps     pqarrow.ArrowWriterProperties
 	// LRU Schema cache (measurement -> schema) with bounded size
 	schemaCache *schemaLRUCache
 
@@ -237,15 +241,56 @@ func NewArrowWriter(cfg *config.IngestConfig, logger zerolog.Logger) *ArrowWrite
 		writerOpts = append(writerOpts, parquet.WithDataPageVersion(parquet.DataPageV2))
 	}
 	return &ArrowWriter{
-		compression:     comp,
-		useDictionary:   cfg.UseDictionary,
-		writeStatistics: cfg.WriteStatistics,
-		dataPageVersion: cfg.DataPageVersion,
-		writerProps:     parquet.NewWriterProperties(writerOpts...),
-		arrowProps:      pqarrow.NewArrowWriterProperties(pqarrow.WithStoreSchema()),
-		schemaCache:     newSchemaLRUCache(schemaCacheCapacity),
-		logger:          logger.With().Str("component", "arrow-writer").Logger(),
+		compression:       comp,
+		useDictionary:     cfg.UseDictionary,
+		numericDictionary: cfg.NumericDictionary,
+		writeStatistics:   cfg.WriteStatistics,
+		dataPageVersion:   cfg.DataPageVersion,
+		writerProps:       parquet.NewWriterProperties(writerOpts...),
+		baseWriterOpts:    writerOpts,
+		arrowProps:        pqarrow.NewArrowWriterProperties(pqarrow.WithStoreSchema()),
+		schemaCache:       newSchemaLRUCache(schemaCacheCapacity),
+		logger:            logger.With().Str("component", "arrow-writer").Logger(),
 	}
+}
+
+// writerPropsFor returns Parquet writer properties for one schema. String and
+// binary columns keep the configured dictionary setting — dictionaries
+// compress repeated tag values extremely well. All other columns (numeric,
+// boolean, timestamp, decimal) get dictionary encoding disabled unless
+// ingest.numeric_dictionary is set: metric values are mostly
+// high-cardinality, so the dictionary path pays a hash-table insert plus an
+// interface boxing per value (~8-10% of write CPU on the sustained-ingest
+// benchmark) and then typically falls back to plain encoding anyway.
+// (Booleans are listed for completeness; the parquet writer never
+// dictionary-encodes the Boolean physical type, so their override is a
+// no-op either way.)
+//
+// Building properties per flush is deliberate: flushes happen tens of times
+// per second at most, and the alternative — caching per schema — would need
+// eviction tied to the schema LRU for no measurable gain.
+func (w *ArrowWriter) writerPropsFor(schema *arrow.Schema) *parquet.WriterProperties {
+	if !w.useDictionary || w.numericDictionary {
+		return w.writerProps
+	}
+	var opts []parquet.WriterProperty
+	for _, f := range schema.Fields() {
+		switch f.Type.ID() {
+		case arrow.STRING, arrow.LARGE_STRING, arrow.BINARY, arrow.LARGE_BINARY:
+			// keep the dictionary default
+		default:
+			if opts == nil {
+				opts = make([]parquet.WriterProperty, 0, len(w.baseWriterOpts)+len(schema.Fields()))
+				opts = append(opts, w.baseWriterOpts...)
+			}
+			opts = append(opts, parquet.WithDictionaryFor(f.Name, false))
+		}
+	}
+	if opts == nil {
+		// No non-string columns — the prebuilt props are already correct.
+		return w.writerProps
+	}
+	return parquet.NewWriterProperties(opts...)
 }
 
 // =============================================================================
@@ -672,7 +717,7 @@ func (w *ArrowWriter) writeRecordToParquet(schema *arrow.Schema, arrays []arrow.
 	writer, err := pqarrow.NewFileWriter(
 		schema,
 		&buf,
-		w.writerProps,
+		w.writerPropsFor(schema),
 		w.arrowProps,
 	)
 	if err != nil {
@@ -709,7 +754,7 @@ type TypedColumnBatch struct {
 	TagColumns []string               // tag column names (for Parquet metadata, enables auto-dedup)
 	// DedupTime propagates ColumnarRecord.DedupTime: when true, the Parquet
 	// footer gets an iedb:dedup_time marker so compaction dedups on time even with
-	// no tag columns. See ColumnarRecord.DedupTime — CQ output only (#521).
+	// no tag columns. See ColumnarRecord.DedupTime — CQ output only.
 	DedupTime bool
 	Signature string // sorted column-name string; cached to avoid per-write recomputation
 }
@@ -962,6 +1007,24 @@ func (b *ArrowBuffer) getDecimalColumns(measurement string) map[string]config.De
 		return specs
 	}
 	return b.defaultDecimalConfig
+}
+
+// HasDecimalColumns reports whether ANY measurement has decimal columns
+// configured. The typed msgpack decode path is disabled entirely on such
+// deployments: decimal conversion is config-driven and happens inside
+// convertColumnsToTyped, and diverting per-measurement at decode time would
+// need the measurement name before the columns are decoded (msgpack map key
+// order is not guaranteed). Decimal deployments keep the generic path's
+// exact semantics; everyone else gets the fast path.
+//
+// INVARIANT: decimalConfig and defaultDecimalConfig are parsed once in
+// NewArrowBuffer and never mutated afterwards. The msgpack handler snapshots
+// this value at construction (SetTypedDecodeEnabled); if decimal config ever
+// becomes runtime-mutable, that snapshot must be revisited or decimal
+// columns would silently take the typed path (signature without "dec" →
+// wrong buffer keying).
+func (b *ArrowBuffer) HasDecimalColumns() bool {
+	return len(b.decimalConfig) > 0 || len(b.defaultDecimalConfig) > 0
 }
 
 // NewArrowBuffer creates a new Arrow buffer with automatic flushing
@@ -1285,6 +1348,14 @@ func (b *ArrowBuffer) Write(ctx context.Context, database string, records interf
 				b.totalErrors.Add(1)
 				return err
 			}
+		case *TypedColumnarRecord:
+			// Typed msgpack decode fast path: already converted, carries the
+			// raw client bytes for the zero-copy WAL branch.
+			if err := b.writeTypedColumnarRaw(ctx, database, r.Measurement, r.Batch, r.NumRecords, r.RawPayload, false); err != nil {
+				b.logger.Error().Err(err).Str("measurement", r.Measurement).Msg("Failed to write typed columnar record")
+				b.totalErrors.Add(1)
+				return err
+			}
 		case *models.Record:
 			// Lazy init: only allocate map when we actually have row records
 			if rowRecordsByMeasurement == nil {
@@ -1293,7 +1364,13 @@ func (b *ArrowBuffer) Write(ctx context.Context, database string, records interf
 			// Group row records by measurement for batch conversion
 			rowRecordsByMeasurement[r.Measurement] = append(rowRecordsByMeasurement[r.Measurement], r)
 		default:
-			b.logger.Warn().Interface("type", fmt.Sprintf("%T", record)).Msg("Unknown record type")
+			// FAIL LOUDLY: an unwired record type here means a decoder
+			// produced a type this dispatch doesn't know — silently dropping
+			// it would return 204 to the client while writing nothing, and
+			// would also mean api/msgpack.go extractMeasurements skipped
+			// measurement validation and RBAC for it. Refuse the write.
+			b.totalErrors.Add(1)
+			return fmt.Errorf("unknown record type %T in write dispatch (unwired decoder output)", record)
 		}
 	}
 
@@ -1329,7 +1406,62 @@ func (b *ArrowBuffer) WriteColumnarRecord(ctx context.Context, database string, 
 
 // WriteColumnarDirectNoWAL writes columnar data without writing to WAL.
 // Used during WAL recovery to avoid re-writing recovered data back to WAL.
+//
+// Note: the WAL stores flattened rows and does NOT carry TagColumns or
+// the DedupTime marker (both are json:"-"), so a Parquet file produced purely
+// from WAL replay has neither iedb:tags nor iedb:dedup_time. In practice this
+// self-heals: compaction unions metadata across all files in a partition, so
+// a replayed file dedups against any marked sibling written normally for the
+// same window. It only fails to dedup if the replayed copy and a marked copy
+// land in different compaction batches — a transient duplicate, never data
+// loss. This matches the pre-existing iedb:tags WAL behavior; propagating the
+// markers through the WAL is a separate, larger change (WAL schema).
 func (b *ArrowBuffer) WriteColumnarDirectNoWAL(ctx context.Context, database, measurement string, columns map[string][]interface{}) error {
+	// Both callers (WAL crash replay, cluster WAL replication) feed
+	// RAW client payloads that never went through the live decode path's
+	// post-processing. Apply it here so replayed data behaves exactly like
+	// live-ingested data:
+	//   - missing/empty time column → generate now-µs (the live path did
+	//     this at original ingest; the WAL stores the client's original
+	//     bytes WITHOUT the generated column, and without it the flush
+	//     wrote nothing — silent data loss)
+	//   - normalize timestamp units to µs (a seconds-precision client's
+	//     entries otherwise land in 1970-era partitions via groupByHour)
+	//   - sanitize strings to valid UTF-8 (invalid UTF-8 breaks DuckDB)
+	// All three are idempotent for already-processed data.
+	//
+	// Structural validation mirrors decodeColumnar: today's inputs are
+	// leader-validated (the WAL stores only payloads that passed the live
+	// decode; replication is HMAC-authenticated), but a checksum-passing
+	// corrupt entry with mismatched column lengths must not flow into the
+	// typed conversion unchecked.
+	numRecords := -1
+	for colName, col := range columns {
+		if numRecords == -1 {
+			numRecords = len(col)
+		} else if len(col) != numRecords {
+			return fmt.Errorf("replayed columnar entry for %s: column length mismatch (expected %d, got %d for '%s')", measurement, numRecords, len(col), colName)
+		}
+	}
+	if numRecords <= 0 {
+		return fmt.Errorf("replayed columnar entry for %s: empty columns", measurement)
+	}
+	if _, ok := columns["time"]; !ok {
+		b.logger.Warn().
+			Str("measurement", measurement).
+			Int("row_count", numRecords).
+			Msg("Replayed data missing 'time' column - generating UTC timestamps")
+		nowMicros := time.Now().UTC().UnixMicro()
+		generated := make([]interface{}, numRecords)
+		for i := range generated {
+			generated[i] = nowMicros
+		}
+		columns["time"] = generated
+	}
+	if err := normalizeTimestampColumns(columns); err != nil {
+		return fmt.Errorf("normalize replayed timestamps for %s: %w", measurement, err)
+	}
+	sanitizeColumnarStrings(columns)
 	record := &models.ColumnarRecord{
 		Measurement: measurement,
 		Columns:     columns,
@@ -1717,18 +1849,40 @@ func (b *ArrowBuffer) writeColumnarInternal(ctx context.Context, database string
 // is already typed ([]int64, []float64, []string). Used by format-specific parsers
 // that know column types at compile time.
 func (b *ArrowBuffer) writeTypedColumnarInternal(ctx context.Context, database, measurement string, typedColumns *TypedColumnBatch, numRecords int, skipWAL bool) error {
+	return b.writeTypedColumnarRaw(ctx, database, measurement, typedColumns, numRecords, nil, skipWAL)
+}
+
+// writeTypedColumnarRaw is writeTypedColumnarInternal with an optional raw
+// msgpack payload for the zero-copy WAL path. When rawPayload is non-empty
+// the WAL stores the original client bytes (AppendRawWithMeta, same as
+// writeColumnarInternal's fast path); otherwise the typed batch is
+// transposed to row records — the pre-existing typed fallback, which is
+// lossy for NULLs (typedBatchToWALRecords ignores Validity; see plan doc).
+// The typed msgpack decode path always supplies rawPayload, so it never
+// takes the lossy fallback.
+func (b *ArrowBuffer) writeTypedColumnarRaw(ctx context.Context, database, measurement string, typedColumns *TypedColumnBatch, numRecords int, rawPayload []byte, skipWAL bool) error {
 	bufferKey := database + "/" + measurement
 
-	// WAL: Convert typed batch to row format for WAL storage
+	// WAL: raw client bytes when available (zero-copy), row transpose otherwise
 	if b.wal != nil && !skipWAL {
-		walRecords := typedBatchToWALRecords(database, measurement, typedColumns, numRecords, b.getDecimalColumns(measurement))
-		if len(walRecords) > 0 {
-			if err := b.wal.Append(walRecords); err != nil {
+		if len(rawPayload) > 0 {
+			if err := b.wal.AppendRawWithMeta(database, rawPayload); err != nil {
 				b.recordWALError(err, func(ev *zerolog.Event) {
 					ev.Str("database", database).
 						Str("measurement", measurement).
-						Int("records", len(walRecords))
+						Int("payload_size", len(rawPayload))
 				})
+			}
+		} else {
+			walRecords := typedBatchToWALRecords(database, measurement, typedColumns, numRecords, b.getDecimalColumns(measurement))
+			if len(walRecords) > 0 {
+				if err := b.wal.Append(walRecords); err != nil {
+					b.recordWALError(err, func(ev *zerolog.Event) {
+						ev.Str("database", database).
+							Str("measurement", measurement).
+							Int("records", len(walRecords))
+					})
+				}
 			}
 		}
 	}

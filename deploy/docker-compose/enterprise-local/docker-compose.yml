@@ -39,7 +39,6 @@ x-traefik-writer-labels: &traefik-writer-labels
     PathPrefix(`/api/v1/cluster`) ||
     PathPrefix(`/api/v1/databases`) ||
     PathPrefix(`/api/v1/tokens`) ||
-    
     PathPrefix(`/api/v1/retention`) ||
     PathPrefix(`/api/v1/continuous-queries`)
   traefik.http.routers.iedb-writers.entrypoints: "web"
@@ -158,6 +157,7 @@ services:
       IEDB_CLUSTER_NODE_ID: "iedb-reader1"
       IEDB_CLUSTER_ROLE: "reader"
       IEDB_CLUSTER_ADVERTISE_ADDR: "iedb-reader1:9100"
+      IEDB_CLUSTER_RAFT_ADVERTISE_ADDR: "iedb-reader1:9200"
     labels:
       <<: *traefik-reader-labels
     depends_on:
