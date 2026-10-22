@@ -12,7 +12,7 @@
 
 services:
   iedb:
-    image: ghcr.io/mengdal/iedb:latest
+    image: ghcr.io/lmgateways/iedb:latest
     container_name: iedb
     hostname: iedb
     ports:

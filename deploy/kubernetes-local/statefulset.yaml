@@ -30,7 +30,7 @@ spec:
     spec:
       containers:
         - name: iedb
-          image: ghcr.io/mengdal/iedb:latest
+          image: ghcr.io/lmgateways/iedb:latest
           ports:
             - containerPort: 8000
               name: http
@@ -134,7 +134,7 @@ spec:
     spec:
       containers:
         - name: iedb
-          image: ghcr.io/mengdal/iedb:latest
+          image: ghcr.io/lmgateways/iedb:latest
           ports:
             - containerPort: 8000
               name: http

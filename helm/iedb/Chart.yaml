@@ -11,9 +11,9 @@ keywords:
   - duckdb
   - analytics
   - go
-home: https://github.com/Mengdal/IotEdgeDB
+home: https://github.com/LMgateways/IotEdgeDB
 sources:
-  - https://github.com/Mengdal/IotEdgeDB
+  - https://github.com/LMgateways/IotEdgeDB
 maintainers:
   - name: LMGateway
     email: luomigateway@vip.qq.com

@@ -16,7 +16,7 @@ updateStrategy:
   #   maxUnavailable: 0
 
 image:
-  repository: ghcr.io/mengdal/iedb
+  repository: ghcr.io/lmgateways/iedb
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion
   tag: ""

@@ -16,7 +16,7 @@ permissions:
 
 env:
   REGISTRY_GHCR: ghcr.io
-  IMAGE_NAME: mengdal/iedb
+  IMAGE_NAME: lmgateways/iedb
 
 jobs:
   # Extract version from branch name or input
@@ -214,7 +214,7 @@ jobs:
 
           # Frontend (zip contains a front/ directory)
           FRONT_ZIP="${RUNNER_TEMP}/front.zip"
-          curl -fsSL -o "${FRONT_ZIP}" -L "https://github.com/Mengdal/iedb-ui/releases/latest/download/front.zip"
+          curl -fsSL -o "${FRONT_ZIP}" -L "https://github.com/LMgateways/iedb-ui/releases/latest/download/front.zip"
           unzip -o "${FRONT_ZIP}" -d "${STAGING}"
           rm -f "${FRONT_ZIP}"
 
@@ -311,7 +311,7 @@ jobs:
           cp iedb.toml ${PKG_DIR}/etc/iedb/iedb.toml
 
           # Download and extract frontend files (zip contains front/ directory)
-          curl -fsSL -o /tmp/front.zip -L "https://github.com/Mengdal/iedb-ui/releases/latest/download/front.zip"
+          curl -fsSL -o /tmp/front.zip -L "https://github.com/LMgateways/iedb-ui/releases/latest/download/front.zip"
           unzip -o /tmp/front.zip -d ${PKG_DIR}/var/lib/iedb
           rm /tmp/front.zip
 
@@ -446,7 +446,7 @@ jobs:
           cp iedb-${{ matrix.binary_suffix }} iedb-${VERSION}/iedb
           chmod +x iedb-${VERSION}/iedb
           cp iedb.toml iedb-${VERSION}/
-          curl -fsSL -o /tmp/front.zip -L "https://github.com/Mengdal/iedb-ui/releases/latest/download/front.zip"
+          curl -fsSL -o /tmp/front.zip -L "https://github.com/LMgateways/iedb-ui/releases/latest/download/front.zip"
           unzip -o /tmp/front.zip -d iedb-${VERSION}
           rm /tmp/front.zip
           tar -czf ~/rpmbuild/SOURCES/iedb-${VERSION}.tar.gz iedb-${VERSION}
@@ -482,7 +482,7 @@ jobs:
           Release:        1%{?dist}
           Summary:        High-performance columnar analytical Database
           License:        AGPL-3.0
-          URL:            https://github.com/Mengdal/IotEdgeDB
+          URL:            https://github.com/LMgateways/IotEdgeDB
           Source0:        iedb-${VERSION}.tar.gz
           Source1:        iedb.service
 
@@ -880,14 +880,14 @@ jobs:
           docker run -d \
             -p 8000:8000 \
             -v iedb-data:/app/data \
-            ghcr.io/mengdal/iedb:${{ needs.prepare.outputs.version }}
+            ghcr.io/lmgateways/iedb:${{ needs.prepare.outputs.version }}
           ```
 
           ### Debian/Ubuntu (amd64, arm64)
 
           ```bash
           # Download and install
-          wget https://github.com/Mengdal/IotEdgeDB/releases/download/v${{ needs.prepare.outputs.version }}/iedb_${{ needs.prepare.outputs.version }}_amd64.deb
+          wget https://github.com/LMgateways/IotEdgeDB/releases/download/v${{ needs.prepare.outputs.version }}/iedb_${{ needs.prepare.outputs.version }}_amd64.deb
           sudo dpkg -i iedb_${{ needs.prepare.outputs.version }}_amd64.deb
 
           # Start and enable
@@ -902,7 +902,7 @@ jobs:
 
           ```bash
           # Download and install
-          wget https://github.com/Mengdal/IotEdgeDB/releases/download/v${{ needs.prepare.outputs.version }}/iedb-${{ needs.prepare.outputs.version }}-1.x86_64.rpm
+          wget https://github.com/LMgateways/IotEdgeDB/releases/download/v${{ needs.prepare.outputs.version }}/iedb-${{ needs.prepare.outputs.version }}-1.x86_64.rpm
           sudo rpm -i iedb-${{ needs.prepare.outputs.version }}-1.x86_64.rpm
 
           # Start and enable
@@ -913,14 +913,14 @@ jobs:
           ### Kubernetes (Helm)
 
           ```bash
-          helm install iedb https://github.com/Mengdal/IotEdgeDB/releases/download/v${{ needs.prepare.outputs.version }}/iedb-${{ needs.prepare.outputs.version }}.tgz
+          helm install iedb https://github.com/LMgateways/IotEdgeDB/releases/download/v${{ needs.prepare.outputs.version }}/iedb-${{ needs.prepare.outputs.version }}.tgz
           ```
 
           ## Download Artifacts
 
           | Platform | Architecture | Package |
           |----------|--------------|---------|
-          | Docker | amd64, arm64 | `ghcr.io/mengdal/iedb:${{ needs.prepare.outputs.version }}` |
+          | Docker | amd64, arm64 | `ghcr.io/lmgateways/iedb:${{ needs.prepare.outputs.version }}` |
           | Debian/Ubuntu | amd64 | `iedb_${{ needs.prepare.outputs.version }}_amd64.deb` |
           | Debian/Ubuntu | arm64 | `iedb_${{ needs.prepare.outputs.version }}_arm64.deb` |
           | RHEL/Fedora | x86_64 | `iedb-${{ needs.prepare.outputs.version }}-1.x86_64.rpm` |
@@ -935,7 +935,7 @@ jobs:
           ## Community
 
           - **Discord**: [Join](https://discord.gg/ZxNNZM8PRb)
-          - **Issues**: [GitHub](https://github.com/Mengdal/IotEdgeDB/issues)
+          - **Issues**: [GitHub](https://github.com/LMgateways/IotEdgeDB/issues)
           EOF
 
           cat release-notes.md
@@ -972,7 +972,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Type | Package |" >> $GITHUB_STEP_SUMMARY
           echo "|------|---------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Docker | \`ghcr.io/mengdal/iedb:${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker | \`ghcr.io/lmgateways/iedb:${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Helm | \`iedb-${VERSION}.tgz\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Debian amd64 | \`iedb_${VERSION}_amd64.deb\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Debian arm64 | \`iedb_${VERSION}_arm64.deb\` |" >> $GITHUB_STEP_SUMMARY

@@ -16,7 +16,7 @@
 # Image
 # -----------------------------------------------------------------------------
 image:
-  repository: ghcr.io/mengdal/iedb
+  repository: ghcr.io/lmgateways/iedb
   tag: ""                          # defaults to Chart.appVersion
   pullPolicy: IfNotPresent
 

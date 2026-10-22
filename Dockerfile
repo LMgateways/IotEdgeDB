@@ -17,7 +17,7 @@ COPY . .
 
 # Download frontend from iedb-ui releases
 RUN apt-get update && apt-get install -y --no-install-recommends unzip && \
-    curl -fsSL -o /tmp/front.zip -L "https://github.com/Mengdal/iedb-ui/releases/latest/download/front.zip" && \
+    curl -fsSL -o /tmp/front.zip -L "https://github.com/LMgateways/iedb-ui/releases/latest/download/front.zip" && \
     unzip -o /tmp/front.zip -d /build && \
     rm /tmp/front.zip && \
     rm -rf /var/lib/apt/lists/*

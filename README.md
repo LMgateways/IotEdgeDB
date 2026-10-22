@@ -128,7 +128,7 @@ docker run -d \
   --name iedb \
   -p 8000:8000 \
   -v iedb-data:/app/data \
-  ghcr.io/mengdal/iedb:latest
+  ghcr.io/lmgateways/iedb:latest
 ```
 
 ## 特性

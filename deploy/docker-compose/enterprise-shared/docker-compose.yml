@@ -8,7 +8,7 @@
 # =============================================================================
 
 x-iedb-common: &iedb-common
-  image: ghcr.io/mengdal/iedb:latest
+  image: ghcr.io/lmgateways/iedb:latest
   networks:
     - iedb-cluster
   depends_on:
